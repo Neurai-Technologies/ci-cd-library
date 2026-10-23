@@ -7,14 +7,13 @@
 # Restores INTO the live database, additively: over a populated database this
 # produces duplicate-key errors, not a clean overwrite. For a from-scratch
 # recovery, bring up a fresh postgres first - THE COMPOSE-DEFINED ONE
-# (docker compose up -d postgres), not the bare image: the dump's OWNER and
+# (docker compose up -d <DB_SERVICE>), not the bare image: the dump's OWNER and
 # GRANT statements name the product's app and backup roles, which come from
 # postgres-init at first initialisation and not from the dump, and a bare
 # postgres refuses the restore on the last of them after applying everything
 # else. Then run this, then start api/worker.
 #
-# Rehearsed 2026-09-23 against a scratch stack, exit 0, row counts matching
-# the live database: docs/restore-rehearsal.md. Repeat with
+# Each product records its own drill runs in its docs. Run one with
 # restore-drill/run.sh after touching backup.sh, this file, postgres-init or
 # the image pin. A backup that has never been restored is a hope, not a backup.
 #
