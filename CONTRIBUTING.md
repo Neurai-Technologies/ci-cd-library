@@ -9,3 +9,6 @@
 - External contributions are accepted only under a signed agreement that
   assigns the rights to Neurai Technologies Private Limited. The repository
   is public; that is not an invitation to contribute.
+- Maintainers review an outside pull request in a separate clone without
+  `just setup`: in a clone with hooks, the next commit or push would run
+  that branch's scripts through the hooks.

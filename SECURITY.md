@@ -163,11 +163,16 @@ third-party services we use, social engineering, denial of service.
   force-push on `main`, requires a pull request, linear history and the CI
   check, with no bypass actors. Apply it with the command in
   docs/PROJECT.md; the check is pinned to the GitHub Actions app so a
-  hand-posted status cannot satisfy it. Not applied yet: the GitHub
-  repository does not exist. Rulesets are not inherited: it is applied
-  once, right after the repository is created. Hooks remain a
-  guardrail, not an authorisation boundary. GitHub's paid scanners (secret protection, CodeQL,
-  dependency review) are not assumed on private repositories.
+  hand-posted status cannot satisfy it. `.github/rulesets/tags.json`
+  makes release tags `v*` immutable: no deletion, no update, no force.
+  Rulesets are not inherited: both are applied once the repository is on
+  GitHub. Changes to `.github/`, `.githooks/`, `scripts/`, `.gitleaks.toml`,
+  `deploy/` and `checks/` (`.github/CODEOWNERS`) are reviewed by hand
+  before merge. That review is policy, not enforced by the ruleset (0
+  required approvals, `require_code_owner_review` false). Hooks remain a
+  guardrail, not an authorisation boundary. GitHub's paid scanners (secret
+  protection, CodeQL, dependency review) are not assumed on private
+  repositories.
 
 ## Current enforcement
 

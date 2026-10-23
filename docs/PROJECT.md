@@ -2,8 +2,9 @@
 
 - Name and purpose: `ci-cd-library`, the shared, versioned CI/CD and ops
   library for Neurai Technologies Private Limited products.
-- Users: the product repositories, which call its workflows by tag or pull
-  it by git subtree at a tag.
+- Users: the product repositories, which call its workflows or pull it by
+  git subtree, pinning a release by its full commit SHA (see the
+  2026-10-23 SHA-pin row in [DECISIONS.md](DECISIONS.md)).
 - Scope: reusable GitHub workflows (ci, promote, worker-deploy), the VM
   deploy loop, backup and log-archive images, restore and restore-drill
   scripts, the macOS LaunchAgent VM autostart script and its installer,
@@ -18,10 +19,13 @@
   owner: the Neurai Technologies Private Limited repository administrator.
 - Licensing and visibility: proprietary ([LICENSE](../LICENSE)); public
   repository.
-- Open: the GitHub repository does not exist yet. After creating it, apply
-  the `main` ruleset once:
-  `gh api -X POST repos/Neurai-Technologies/ci-cd-library/rulesets --input .github/rulesets/main.json`
-  and confirm GitHub Pages is off.
+- Open, once the repository is on GitHub:
+  - apply both rulesets once:
+    `gh api -X POST repos/Neurai-Technologies/ci-cd-library/rulesets --input .github/rulesets/main.json`
+    and the same with `.github/rulesets/tags.json`;
+  - Actions settings: "Require approval for all outside collaborators",
+    and default workflow permissions read-only;
+  - confirm GitHub Pages is off.
 
 Use [DECISIONS.md](DECISIONS.md) for rationale and
 [DEPENDENCIES.md](DEPENDENCIES.md) for dependency records.

@@ -1,7 +1,8 @@
-# Keeps the pinned action SHAs current. Bot PRs receive no CI here and are
-# never merged from the button: apply the bump locally, run `just ci`, and
-# push it through the normal path. The cooldown holds a new release back for
-# a week so a compromised version pulled within hours never reaches a PR;
+# Keeps the pinned action SHAs current. CI runs on bot PRs with a read-only
+# token and no secrets. They are never merged from the button: apply the
+# bump locally, run `just ci`, and push it through the normal path. The
+# cooldown holds a new release back for a week so a compromised version
+# pulled within hours never reaches a PR;
 # it applies to version updates only, never to security updates.
 version: 2
 updates:

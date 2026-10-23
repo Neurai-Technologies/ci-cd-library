@@ -248,7 +248,9 @@ Rules:
 - Every product-specific value comes from `product.env`, kept in the product
   repository. A new setting is added to `deploy/product.env.example` in the
   same change.
-- Consumers pin a tag. Nothing changes in a product until it bumps the tag.
+- Consumers pin the full commit SHA of a release tag, with a `# vX.Y.Z`
+  comment, never the tag alone. Nothing changes in a product until it
+  bumps the pin.
 - `main` is pull-request only; there is no deploy-on-push.
 - `deploy/` and `.github/workflows/` are security-sensitive paths: every
   change there gets a security review before commit.

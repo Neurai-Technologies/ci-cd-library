@@ -7,12 +7,19 @@ VM autostart script and its installer, and generic check tests.
 
 ## How products use it
 
-Always by tag. Nothing changes in a product until it bumps the tag.
+Always by the full commit SHA of a release tag, with the tag in a
+`# vX.Y.Z` comment; never by the tag alone. Nothing changes in a product
+until it bumps the pin.
 
-- Workflows: `uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-ci.yml@vX.Y.Z`
+- Workflows: `uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-ci.yml@<full commit SHA> # vX.Y.Z`
   (likewise `reusable-promote.yml` and `reusable-worker-deploy.yml`).
-- Deploy, backup and VM scripts: `git subtree add --squash` of a tag into
-  the product repository, then `git subtree pull` to a newer tag.
+- Deploy, backup and VM scripts: fetch the release tag, check it resolves
+  to the pinned SHA (`git rev-parse vX.Y.Z^{commit}`), then
+  `git subtree add --prefix <dir> --squash <full SHA>`. To update, do the
+  same for the new tag with
+  `git subtree pull --prefix <dir> --squash <repository> <full SHA>`.
+  Fetching a bare SHA from GitHub works for reachable commits (unverified
+  here).
 
 The adoption steps will live in `docs/ADOPT.md`.
 
