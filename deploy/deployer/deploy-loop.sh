@@ -42,6 +42,10 @@ set -euo pipefail
 : "${API_READY_CMD:?API_READY_CMD must be set (product.settings)}"
 : "${WORKER_SERVICE:?WORKER_SERVICE must be set (product.settings)}"
 : "${WORKER_READY_CMD:?WORKER_READY_CMD must be set (product.settings)}"
+# A whitespace-only command would split into no words at all.
+for cmd in MIGRATE_CHECK_CMD API_READY_CMD WORKER_READY_CMD; do
+    [ -n "${!cmd//[[:space:]]/}" ] || { echo "$cmd must not be blank (product.settings)" >&2; exit 1; }
+done
 REPO="$GITHUB_REPO"
 BRANCH="${DEPLOY_BRANCH:-main}"
 POLL="${DEPLOY_POLL_SECONDS:-90}"
@@ -53,6 +57,17 @@ COMPOSE_DIR_ABS="${SRC}/${COMPOSE_DIR}"
 HOOK="${POST_DEPLOY_HOOK:-}"
 # Optional: a script in the clone, run when the site serves a new sha.
 SITE_HOOK="${SITE_RELEASE_HOOK:-}"
+# The space-separated settings are split where they are used with read -a,
+# which splits without globbing, so no word is matched against the working
+# directory. Each ENV_FILES entry is copied from /host-env into the compose
+# directory, so it must be a plain file name: a slash would read or write
+# outside either.
+read -r -a ENV_FILE_LIST <<<"$ENV_FILES"
+for name in ${ENV_FILE_LIST[@]+"${ENV_FILE_LIST[@]}"}; do
+    case "$name" in
+        */*) echo "ENV_FILES entries must be file names without a slash: ${name}" >&2; exit 1 ;;
+    esac
+done
 # The release policy (see render_policy): the workflow every release needs,
 # and the post-release workflow the gate ignores.
 TESTS_WORKFLOW="${TESTS_WORKFLOW:-.github/workflows/tests.yml}"
@@ -243,6 +258,15 @@ check_site() {
     fi
 }
 
+hook_path_ok() {
+    # A hook is a path inside the clone: not absolute and with no .. segment.
+    # (Whether it is a symlink is checked where it runs, at that sha.)
+    case "/$1/" in
+        //*|*/../*) return 1 ;;
+    esac
+    return 0
+}
+
 run_site_hook() {
     # The product's step for a published release (telling search engines
     # which pages changed, say), run now that the site serves this sha, with
@@ -268,14 +292,17 @@ run_site_hook() {
         alert "${PRODUCT} site release hook FAILED for ${sha:0:7} (checkout); the next published sha retries from ${before:0:7}; see docker logs ${COMPOSE_PROJECT}-deployer-1"
         return 0
     fi
-    # Set but not there at this sha is a failed run, never a silent skip.
-    if [ ! -f "$SRC/$SITE_HOOK" ] || [ ! -x "$SRC/$SITE_HOOK" ]; then
-        alert "${PRODUCT} site release hook FAILED for ${sha:0:7}: ${SITE_HOOK} is missing or not executable; the next published sha retries from ${before:0:7}"
+    # Set but not there at this sha is a failed run, never a silent skip; a
+    # symlink could point anywhere, so it is refused the same way.
+    if [ -L "$SRC/$SITE_HOOK" ] || [ ! -f "$SRC/$SITE_HOOK" ] || [ ! -x "$SRC/$SITE_HOOK" ]; then
+        alert "${PRODUCT} site release hook FAILED for ${sha:0:7}: ${SITE_HOOK} is missing or not executable, or is a symlink; the next published sha retries from ${before:0:7}"
         return 0
     fi
     log "running site release hook ${SITE_HOOK}"
-    # From the clone's root, so the hook's relative paths are the repository's.
-    if (cd "$SRC" && timeout 900 "$SRC/$SITE_HOOK" "$sha" "$before"); then
+    # From the clone's root, so the hook's relative paths are the repository's,
+    # and without the GitHub token or the alert URL, which a hook never needs.
+    if (cd "$SRC" && env -u GITHUB_DEPLOY_TOKEN -u DEPLOY_ALERT_URL \
+        timeout 900 "$SRC/$SITE_HOOK" "$sha" "$before"); then
         echo "$sha" 2>/dev/null >"$SITE_HOOKED" || log "could not write ${SITE_HOOKED}"
         log "site release hook done for ${before:0:7}..${sha:0:7}"
     else
@@ -367,9 +394,10 @@ sync_env() {
     # resolved `./.env` against the clone and
     # the mount IS the destination: cp refuses "the same file", which must not
     # fail the deploy - the clone already holds exactly what the mount shows.
-    # ENV_FILES is a space-separated list of file names; split on purpose.
-    local name
-    for name in $ENV_FILES; do
+    # Names only (checked at start), split without globbing.
+    local name names
+    read -r -a names <<<"$ENV_FILES"
+    for name in ${names[@]+"${names[@]}"}; do
         if [ "$ENVDIR/$name" -ef "$COMPOSE_DIR_ABS/$name" ]; then
             log "WARNING: $ENVDIR/$name is the clone's own copy; host edits will not reach the stack until the deployer is recreated from the host ${COMPOSE_DIR}/ directory"
             continue
@@ -433,10 +461,11 @@ schema_compatible() {
         log "REFUSED: the migrate image would not build for the schema check ($(printf '%s' "$check" | tail -n 3 | tr '\n' ' '))"
         return 1
     }
-    # MIGRATE_CHECK_CMD is split into words on purpose (no quoting inside it).
-    # shellcheck disable=SC2086
+    # MIGRATE_CHECK_CMD split into words without globbing.
+    local migrate_check
+    read -r -a migrate_check <<<"$MIGRATE_CHECK_CMD"
     if check=$(docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" run --rm -T "$MIGRATE_SERVICE" \
-        $MIGRATE_CHECK_CMD 2>&1); then
+        ${migrate_check[@]+"${migrate_check[@]}"} 2>&1); then
         # Drop compose's own "Container ... Running" lines from the record.
         log "schema check: $(printf '%s' "$check" | grep -v '^ *Container ' | tr '\n' ' ')"
         return 0
@@ -489,26 +518,30 @@ deploy() {
     # Run from the clone's root, so the hook's relative paths are the repository's.
     if [ -n "$HOOK" ]; then
         FAILED_STEP="post-deploy hook"
-        if [ ! -f "$SRC/$HOOK" ] || [ ! -x "$SRC/$HOOK" ]; then
-            log "post-deploy hook ${HOOK} is missing or not executable"
+        # A symlink could point anywhere: refused like a missing file.
+        if [ -L "$SRC/$HOOK" ] || [ ! -f "$SRC/$HOOK" ] || [ ! -x "$SRC/$HOOK" ]; then
+            log "post-deploy hook ${HOOK} is missing or not executable, or is a symlink"
             return 1
         fi
         log "running post-deploy hook ${HOOK}"
-        (cd "$SRC" && timeout 900 "$SRC/$HOOK" "$sha") || return 1
+        # Without the GitHub token or the alert URL, which a hook never needs.
+        (cd "$SRC" && env -u GITHUB_DEPLOY_TOKEN -u DEPLOY_ALERT_URL \
+            timeout 900 "$SRC/$HOOK" "$sha") || return 1
     fi
     # Starting a container is not readiness. Do not advance the release marker
     # until the API can answer and its dependencies are reachable:
     # API_READY_CMD runs inside API_SERVICE and exits 0 only when it is ready.
-    # Both readiness commands are split into words on purpose.
+    # Both readiness commands are split into words without globbing.
+    local api_ready worker_ready
+    read -r -a api_ready <<<"$API_READY_CMD"
+    read -r -a worker_ready <<<"$WORKER_READY_CMD"
     FAILED_STEP="${API_SERVICE} readiness"
-    # shellcheck disable=SC2086
     docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$API_SERVICE" \
-        $API_READY_CMD || return 1
+        ${api_ready[@]+"${api_ready[@]}"} || return 1
     # The worker: WORKER_READY_CMD checks its own registration and dependencies.
     FAILED_STEP="worker readiness"
-    # shellcheck disable=SC2086
     docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$WORKER_SERVICE" \
-        $WORKER_READY_CMD || return 1
+        ${worker_ready[@]+"${worker_ready[@]}"} || return 1
     # A marker that could not be written is a deploy not recorded: say so
     # once and retry next tick, rather than announcing the same deploy every
     # tick against a stale marker.
@@ -548,6 +581,18 @@ app_changed() {
     return 0
 }
 
+# Hook paths stay inside the clone. A bad deploy hook stops the loop here,
+# as a missing one fails every deploy; a bad site hook is alerted and skipped,
+# as a missing one is.
+if [ -n "$HOOK" ] && ! hook_path_ok "$HOOK"; then
+    log "POST_DEPLOY_HOOK must be a path inside the repository (not absolute, no ..): ${HOOK}"
+    exit 1
+fi
+if [ -n "$SITE_HOOK" ] && ! hook_path_ok "$SITE_HOOK"; then
+    log "SITE_RELEASE_HOOK must be a path inside the repository (not absolute, no ..): ${SITE_HOOK}; site hook off"
+    alert "${PRODUCT} site release hook OFF: SITE_RELEASE_HOOK is not a path inside the repository"
+    SITE_HOOK=""
+fi
 render_policy || { log "could not write ${SCRIPT_DIR}/ci-policy.json"; exit 1; }
 ensure_clone
 log "watching ${REPO}@${BRANCH} every ${POLL}s"

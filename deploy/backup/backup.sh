@@ -30,6 +30,11 @@ command -v openssl >/dev/null 2>&1 || {
 : "${DB_NAME:?DB_NAME must be set (product.settings)}"
 : "${DB_BACKUP_USER:?DB_BACKUP_USER must be set (product.settings)}"
 : "${BACKUP_PREFIX:?BACKUP_PREFIX must be set (product.settings)}"
+# The prefix goes into the prunes' find -name patterns, where a * or ? would
+# widen what they delete: letters, digits, _ and - only.
+case "$BACKUP_PREFIX" in
+    *[!A-Za-z0-9_-]*) echo "BACKUP_PREFIX may hold only letters, digits, _ and -" >&2; exit 1 ;;
+esac
 
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-14}"
 # The ceiling, enforced whatever the dumps do. See the two prunes in the loop:

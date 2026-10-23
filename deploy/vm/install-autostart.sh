@@ -151,7 +151,7 @@ if ! cmp -s "$WORK/product.settings" "$WORK/main-product.settings"; then
     diff "$WORK/main-product.settings" "$WORK/product.settings" | head -40 || true
     stop "the working-tree $ENV_REL differs from GitHub's main (diff above: main first)"
 fi
-echo "ok: all three files match GitHub's main at $(git -C "$WORK/origin" rev-parse --short HEAD)"
+echo "ok: all three files match main of $ORIGIN_URL at $(git -C "$WORK/origin" rev-parse --short HEAD)"
 echo "script sha256: $(shasum -a 256 "$WORK/vm-autostart.sh" | cut -d' ' -f1)"
 
 # Only now read the settings, and from the clone, never the working tree.
@@ -169,6 +169,22 @@ echo "script sha256: $(shasum -a 256 "$WORK/vm-autostart.sh" | cut -d' ' -f1)"
 # checkout, the one just verified.
 [ "$REPO_DIR" = "$REPO_ROOT" ] || stop "product.settings names REPO_DIR $REPO_DIR, but this checkout is $REPO_ROOT"
 [ "$LIBRARY_DIR" = "$LIBRARY_REL" ] || stop "product.settings names LIBRARY_DIR $LIBRARY_DIR, but this installer is in $LIBRARY_REL"
+# The login job sources product.settings from APP_SUPPORT_DIR, so it must sit
+# where sandboxed agents cannot write: under ~/Library, with no symlink on the
+# way that could point it back into a writable tree.
+# Trailing slashes off first, so $HOME/Library/ cannot pass as a folder below it.
+while [ "${APP_SUPPORT_DIR%/}" != "$APP_SUPPORT_DIR" ]; do APP_SUPPORT_DIR="${APP_SUPPORT_DIR%/}"; done
+case "$APP_SUPPORT_DIR" in
+    */.. | */../*) stop "APP_SUPPORT_DIR must not contain .. ($APP_SUPPORT_DIR)" ;;
+    "$HOME/Library/"*) ;;
+    *) stop "APP_SUPPORT_DIR must be under $HOME/Library (got $APP_SUPPORT_DIR)" ;;
+esac
+d="$APP_SUPPORT_DIR"
+while [ "$d" != "$HOME/Library" ] && [ "$d" != / ]; do
+    [ ! -L "$d" ] || stop "$d is a symlink; APP_SUPPORT_DIR must be a real folder under $HOME/Library"
+    d="$(dirname "$d")"
+done
+[ "$d" = "$HOME/Library" ] || stop "APP_SUPPORT_DIR must be a folder below $HOME/Library (got $APP_SUPPORT_DIR)"
 DEST_DIR="$APP_SUPPORT_DIR"
 DEST="$DEST_DIR/vm-autostart.sh"
 DEST_ENV="$DEST_DIR/product.settings"
@@ -193,6 +209,12 @@ step "4. Check the copies' contents and render the plist"
 bash -n "$WORK/vm-autostart.sh" || stop "vm-autostart.sh does not parse"
 grep -q '^pgdata_present()' "$WORK/vm-autostart.sh" || stop "vm-autostart.sh lacks the pgdata_present guard"
 grep -q '^erasure_clause()' "$WORK/vm-autostart.sh" || stop "vm-autostart.sh lacks the erasure alert"
+# These go into the plist as XML text; refuse characters XML would need escaped.
+for v in "$LAUNCH_LABEL" "$APP_SUPPORT_DIR" "$LOG_BASE"; do
+    case "$v" in
+        *[\<\>\&\"\']*) stop "LAUNCH_LABEL, APP_SUPPORT_DIR and the log path must not contain any of <>&\"' (got $v)" ;;
+    esac
+done
 sed -e "s|__LAUNCH_LABEL__|$(esc "$LAUNCH_LABEL")|g" \
     -e "s|__SCRIPT_PATH__|$(esc "$DEST")|g" \
     -e "s|__LOG_BASE__|$(esc "$LOG_BASE")|g" \
