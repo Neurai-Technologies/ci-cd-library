@@ -1,0 +1,74 @@
+name: Repository checks
+
+# Baseline: documentation hygiene and secret scanning. Extend this workflow
+# and `just ci` together as tests land under checks/ and deploy/. Keep:
+# ubuntu-latest only, permissions read-only, a timeout on every job,
+# cancel-in-progress on checks (never on a deploy), SHA-pinned actions with
+# a version comment that Dependabot keeps current, and no path-based skips.
+# main is pull-request only, so pushes run CI only on main (after a merge) and
+# every branch is checked once, through its pull request.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This repository publishes nothing through GitHub Pages, so the Pages check
+# below fails while Pages is on. Only the owner sets this to "true", with an
+# entry in docs/DECISIONS.md; an agent never sets it to make CI pass.
+env:
+  PAGES_ALLOWED: "false"
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check documentation
+        run: python3 scripts/check_docs.py
+      - name: Check sensitive paths
+        shell: bash
+        run: git ls-files -z | bash scripts/sensitive-paths.sh
+      - name: Check scanner bypasses
+        run: test ! -e .gitleaksignore
+      - name: Install checksum-pinned Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/ci-cd-library-tools"
+          mkdir -p "$target"
+          curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$target/gitleaks.tar.gz"
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$target/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$target/gitleaks.tar.gz" -C "$target" gitleaks
+          printf '%s\n' "$target" >> "$GITHUB_PATH"
+      - name: Scan current files
+        run: gitleaks dir . --redact --no-banner --ignore-gitleaks-allow --config .gitleaks.toml
+      - name: Scan full history
+        run: gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config .gitleaks.toml
+      # CI only: it asks GitHub's API, so `just ci` has no local equivalent.
+      # has_pages comes with the repository's metadata, which this token can
+      # always read; any answer but false or an allowed true fails the step.
+      - name: Check GitHub Pages is off
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_TELEMETRY: "false"
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          pages=$(gh api "repos/$REPO" --jq .has_pages)
+          if [ "$pages" = false ]; then exit 0; fi
+          if [ "$pages" = true ] && [ "$PAGES_ALLOWED" = true ]; then exit 0; fi
+          echo "GitHub Pages is on for $REPO (has_pages: $pages). Pages must stay off unless PAGES_ALLOWED is true; this repo publishes nothing through Pages. If it had its own custom domain, first delete the DNS records of that name, with and without www., that point at GitHub (keep the verification TXT record) and wait out their TTL. Then turn it off: Pages source None in Settings, or gh api -X DELETE repos/$REPO/pages. Only the owner sets PAGES_ALLOWED, with a docs/DECISIONS.md entry."
+          exit 1

@@ -1,0 +1,73 @@
+title = "Repository baseline"
+
+# Defaults plus rules for providers the defaults miss (checked against
+# Gitleaks 8.30.1 on 2026-09-29). No allowlist: add one only for a verified
+# false positive, as a path AND a line regex with the reason here. CI fails
+# on any inline allow comment or .gitleaksignore file.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "supabase-secret-key"
+description = "Supabase secret API key (sb_secret_ + 22 base64url + _ + 8 checksum)"
+regex = '''\b(sb_secret_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{8})(?:[^A-Za-z0-9_-]|$)'''
+entropy = 3.0
+keywords = ["sb_secret_"]
+
+[[rules]]
+id = "supabase-personal-access-token"
+description = "Supabase personal access token (sbp_ or sbp_v0_ + 40 hex)"
+regex = '''\b(sbp_(?:v0_)?[a-f0-9]{40})\b'''
+keywords = ["sbp_"]
+
+[[rules]]
+id = "resend-api-key"
+description = "Resend API key on a line that names the provider (key format not published by Resend)"
+regex = '''(?i)resend[^\n]{0,60}?(?:=|:\s*|["'])\s*(re_[A-Za-z0-9]{6,12}_[A-Za-z0-9]{20,40})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 4.2
+keywords = ["resend"]
+
+[[rules]]
+id = "razorpay-key-secret"
+description = "Razorpay key secret: assigned near a razorpay keyword, or paired with a key id in an SDK tuple (secret format unverified; the key id rzp_* is public)"
+regex = '''(?i)(?:razorpay[a-z_-]*secret["']?\s*[:=]\s*["']?|rzp_(?:live|test)_[A-Za-z0-9]{14}["']\s*,\s*["'])([A-Za-z0-9]{20,})(?:["'\s,;}]|$)'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["razorpay", "rzp_"]
+
+# The next four carry over what the machine-global pre-commit regex caught and
+# the default rules miss, since the repository hooks rely on gitleaks alone:
+# low-entropy passwords and passphrases, credentials in a connection URI,
+# sk- and sk-ant- keys of any form, and ya29. tokens (checked against
+# Gitleaks 8.30.1 on 2026-09-30). Not carried over: a URI password shorter
+# than 6 characters (user:pass@ in examples), a private-key header line
+# without the key body, and an AWS secret-key variable name with nothing
+# assigned. The URI rule skips a password that starts with $, < or {, so a
+# compose file building the URI from ${POSTGRES_PASSWORD} is not flagged.
+[[rules]]
+id = "uri-embedded-credentials"
+description = "Password embedded in a connection URI (scheme://user:password@host)"
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?)(?:\+[a-z0-9]+)?://[^\s:/@'"]*:([^\s:/@'"$<{][^\s/@'"]{5,})@'''
+secretGroup = 1
+keywords = ["postgres", "mysql", "mariadb", "mongodb", "redis", "amqp"]
+
+[[rules]]
+id = "quoted-secret-assignment"
+description = "A secret-named key assigned a quoted literal of 8 or more characters"
+regex = '''(?i)(?:api[_-]?key|api[_-]?secret|api[_-]?token|password|passwd|secret|credential)\s*[:=]\s*["']([^\s"']{8,})'''
+secretGroup = 1
+keywords = ["key", "secret", "token", "password", "passwd", "credential"]
+
+[[rules]]
+id = "sk-prefixed-key"
+description = "sk- API key, including every sk-ant- form (OpenAI-style and Anthropic keys and OAuth tokens)"
+regex = '''\b(sk-(?:ant-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,}))'''
+keywords = ["sk-"]
+
+[[rules]]
+id = "google-oauth-access-token"
+description = "Google OAuth access token (ya29.)"
+regex = '''\b(ya29\.[A-Za-z0-9_-]{20,})'''
+keywords = ["ya29."]

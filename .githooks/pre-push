@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Repository-local pre-push gate. Installed by `just setup`.
+# Always: full-history secret scan. When code changes: `just ci`.
+# Fails closed: unknown ranges and missing tools count as failures.
+set -uo pipefail
+
+root=$(git rev-parse --show-toplevel) || { echo "[pre-push] not a git repository" >&2; exit 1; }
+cd "$root" || exit 1
+# shellcheck source=.githooks/_guard.sh
+. "$root/.githooks/_guard.sh"
+guard_prepush || exit 1
+
+[ ! -e "$root/.gitleaksignore" ] || { echo "[pre-push] .gitleaksignore is not allowed; fix the finding or add a narrow config allowlist" >&2; exit 1; }
+command -v gitleaks >/dev/null || { echo "[pre-push] gitleaks is required (brew install gitleaks)" >&2; exit 1; }
+gitleaks git --redact --no-banner --ignore-gitleaks-allow --config "$root/.gitleaks.toml" || exit 1
+
+# Decide whether the pushed commits touch code. Documentation-only pushes
+# skip `just ci`; anything unknown or undeterminable counts as code.
+zero=0000000000000000000000000000000000000000
+noncode='\.(md|txt|rst|png|jpg|jpeg|gif|svg|webp)$|(^|/)(LICENSE|NOTICE|CODEOWNERS|THIRD_PARTY_NOTICES\.md|\.gitignore|\.gitattributes)$'
+needs_ci=0
+if [ -t 0 ]; then
+  needs_ci=1
+else
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue
+    if [ "$remote_sha" = "$zero" ]; then needs_ci=1; continue; fi
+    files=$(git diff --name-only "$remote_sha".."$local_sha" 2>/dev/null) || { needs_ci=1; continue; }
+    if printf '%s\n' "$files" | grep -qvE "$noncode"; then needs_ci=1; fi
+  done
+fi
+
+if [ "$needs_ci" -eq 1 ]; then
+  command -v just >/dev/null || { echo "[pre-push] just is required to run ci" >&2; exit 1; }
+  # shellcheck disable=SC2046  # the variable names are meant to split
+  ( unset $(git rev-parse --local-env-vars); exec just --justfile "$root/justfile" --working-directory "$root" ci ) || exit 1
+else
+  echo "[pre-push] documentation-only push; ci skipped, secret scan passed." >&2
+fi
+exit 0

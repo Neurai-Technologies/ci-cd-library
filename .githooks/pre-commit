@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Repository-local pre-commit gate. Installed by `just setup`.
+# Fails closed: a missing scanner or runner is a failure, not a skip.
+set -uo pipefail
+
+root=$(git rev-parse --show-toplevel) || { echo "[pre-commit] not a git repository" >&2; exit 1; }
+cd "$root" || exit 1
+# shellcheck source=.githooks/_guard.sh
+. "$root/.githooks/_guard.sh"
+guard_precommit || exit 1
+
+# 1. Sensitive paths are refused even when force-added past .gitignore.
+#    NUL-separated names: git quotes non-ASCII paths otherwise.
+git diff --cached --name-only -z --diff-filter=d | bash "$root/scripts/sensitive-paths.sh" || exit 1
+
+# 2. Secret scan of the staged change. Required, never skipped. The ignore
+#    file would silence findings, so it is refused here, in the protected hook.
+[ ! -e "$root/.gitleaksignore" ] || { echo "[pre-commit] .gitleaksignore is not allowed; fix the finding or add a narrow config allowlist" >&2; exit 1; }
+command -v gitleaks >/dev/null || { echo "[pre-commit] gitleaks is required (brew install gitleaks)" >&2; exit 1; }
+gitleaks git --pre-commit --staged --redact --no-banner --ignore-gitleaks-allow --config "$root/.gitleaks.toml" || exit 1
+
+# 3. The project's pre-commit recipe when it defines one. Git's hook
+#    variables are scrubbed so tests that spawn git in temp dirs still work.
+command -v just >/dev/null || { echo "[pre-commit] just is required (brew install just)" >&2; exit 1; }
+recipes=$(just --justfile "$root/justfile" --working-directory "$root" --summary) || { echo "[pre-commit] justfile does not parse" >&2; exit 1; }
+if printf '%s\n' "$recipes" | tr ' ' '\n' | grep -qx pre-commit; then
+  # shellcheck disable=SC2046  # the variable names are meant to split
+  ( unset $(git rev-parse --local-env-vars); exec just --justfile "$root/justfile" --working-directory "$root" pre-commit ) || exit 1
+fi
+exit 0
