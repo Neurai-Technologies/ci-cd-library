@@ -1,0 +1,112 @@
+# Product settings for every ci-cd-library script: the deployer, backup and
+# logarchive services, and the VM autostart, restore and restore drill.
+# Copy to product.settings next to the product's compose file (env_file resolves
+# against that directory); the services read it with `env_file: product.settings`,
+# the VM and restore scripts read it directly.
+# No secrets here: those stay in .env.
+# Dotenv format, valid as shell: lists are space-separated and double-quoted
+# (the shell and compose both strip the quotes).
+# Paths marked "relative" are relative to the product repository's root.
+#
+# Not keys (set per run by the scripts or the operator, never here):
+# PRODUCT_SETTINGS (path of this file, for restore.sh), RESTORE_SERVICE and
+# RESTORE_PROJECT (where restore.sh loads a dump; the drill sets its own),
+# RESTORE_UNVERIFIED (restore a dump that has no .hmac sidecar).
+
+# ---- Shared ----------------------------------------------------------------
+
+# Product name used in alerts, logs and file names.
+PRODUCT=myproduct
+# Compose project name of the running stack (docker compose -p).
+COMPOSE_PROJECT=myproduct
+# Directory of the product's compose file, relative (as deploy-loop.sh uses it).
+COMPOSE_DIR=deploy
+# Directory of the ci-cd-library subtree, relative.
+LIBRARY_DIR=ci-cd-library
+# Compose service name of the database.
+DB_SERVICE=db
+# Database owner role (VM checks, restore).
+DB_USER=myproduct
+# Database the backup service dumps and restore loads.
+DB_NAME=myproduct
+# File name prefix of the encrypted dumps (<prefix>-<timestamp>.sql.gz.enc).
+BACKUP_PREFIX=myproduct
+# Label-only salt of the dumps' .hmac sidecars: exactly 8 bytes; an existing deployment keeps the value its dumps were made with.
+BACKUP_HMAC_SALT=exsalt01
+
+# ---- Deployer --------------------------------------------------------------
+
+# GitHub repository (owner/name) the deployer clones, polls and checks CI for.
+GITHUB_REPO=example-org/myproduct
+# Branch the deployer deploys from (the release policy's target branch).
+DEPLOY_BRANCH=main
+# Branch CI and promotion start from; the deployer alerts on its failed runs.
+SOURCE_BRANCH=ci
+# Workflow that must have passed on a release-branch push before a sha deploys.
+TESTS_WORKFLOW=.github/workflows/tests.yml
+# Post-release workflow the deploy gate ignores (it runs after the release).
+PROMOTE_WORKFLOW=.github/workflows/promote.yml
+# Deployer state directory; the clone is SRC_DIR/repo. Must equal the deployer's bind-mount path.
+SRC_DIR=/srv/myproduct-src
+# Env files the deployer copies from /host-env into COMPOSE_DIR before each deploy.
+ENV_FILES=".env app.env"
+# Git pathspecs whose changes alone do not redeploy the stack (empty: every change deploys).
+APP_IGNORE_PATHS="site docs *.md"
+# URL of the site's JSON release marker ({"sha": "<40-hex>"}) that the deployer watches.
+SITE_URL=https://www.example.com/_release.json
+# Name of the database's named volume, without the COMPOSE_PROJECT_ prefix.
+DB_VOLUME=dbdata
+# Compose service that runs the schema-compatibility check before each deploy.
+MIGRATE_SERVICE=migrator
+# Command run in MIGRATE_SERVICE; exits 0 only when this commit can migrate the database (split on spaces).
+MIGRATE_CHECK_CMD="myproduct-migrate --check"
+# Compose service of the API.
+API_SERVICE=api
+# Command run in API_SERVICE; exits 0 only when the API is ready (split on spaces).
+API_READY_CMD="myproduct-api --ready"
+# Compose service of the background worker.
+WORKER_SERVICE=jobs
+# Command run in WORKER_SERVICE; exits 0 only when the worker is ready (split on spaces).
+WORKER_READY_CMD="myproduct-worker --ready"
+# Optional executable, relative, run after each successful compose up with the sha as $1 (empty: none).
+POST_DEPLOY_HOOK=deploy/post-deploy.sh
+# Optional executable, relative, run when the site serves a new sha: $1 that sha, $2 the last sha it succeeded for (empty: none).
+SITE_RELEASE_HOOK=deploy/site-release.sh
+
+# ---- Backup ----------------------------------------------------------------
+
+# Read-only database role the backup service dumps as.
+DB_BACKUP_USER=myproduct_backup
+
+# ---- VM and restore --------------------------------------------------------
+
+# Absolute path of the product checkout on the host.
+REPO_DIR=/srv/myproduct
+# Colima profile of the product's VM.
+COLIMA_PROFILE=myproduct
+# Colima home directory holding that profile.
+COLIMA_HOME=/srv/myproduct-vm
+# LaunchAgent label of the VM autostart job.
+LAUNCH_LABEL=com.example.myproduct.vm-autostart
+# Directory for the autostart's state and logs.
+APP_SUPPORT_DIR=/srv/myproduct-support
+# Public origin the autostart checks once the stack is up.
+ORIGIN_URL=https://app.example.com
+# Query a restore must answer to count as verified.
+RESTORE_VERIFY_SQL="select count(*) from users"
+# Optional query that checks erasure requests were honoured after a restore (empty: skip).
+ERASURE_CHECK_SQL=
+# Block device of the VM's data disk. Default: /dev/vdb1.
+DATA_DISK_DEVICE=/dev/vdb1
+# Age in hours past which the newest dump counts as stale. Default: 48.
+MAX_DUMP_AGE_HOURS=48
+# Host directory of the encrypted dumps. Default: ${REPO_DIR}/backups.
+BACKUP_DIR=/srv/myproduct/backups
+# Compose service name of the deployer. Default: deployer.
+DEPLOYER_SERVICE=deployer
+# Compose profile the deployer runs under. Default: ops.
+OPS_PROFILE=ops
+# Database image the restore drill runs. Default: postgres:16.15-alpine.
+POSTGRES_IMAGE=postgres:16.15-alpine
+# Postgres init scripts the restore drill mounts, relative.
+POSTGRES_INIT_DIR=deploy/postgres-init

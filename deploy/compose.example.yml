@@ -1,0 +1,167 @@
+# The deployer, backup and logarchive services of ci-cd-library. A product
+# merges these into its own compose file (services, the x-log-bounds anchor,
+# the backup-heartbeat volume and the logarchive network); its database, API,
+# worker and proxy services stay its own.
+#
+# Paths below are relative to the product's compose file and assume it sits in
+# deploy/ with the library subtree at ci-cd-library/ (product.settings.example:
+# COMPOSE_DIR=deploy, LIBRARY_DIR=ci-cd-library); adjust both together.
+#
+# env_file sets each container's environment only. Compose does not use it
+# to interpolate ${...} in this file: those come from the project's .env, as
+# in the original stack, so product.settings keys are never written as ${...} here.
+
+x-log-bounds: &log-bounds
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  backup:
+    # Built from the pinned database image + the openssl CLI; see its Dockerfile.
+    build: ../ci-cd-library/deploy/backup
+    entrypoint: ["/bin/sh", "/scripts/backup.sh"]
+    # DB_SERVICE, DB_NAME, DB_BACKUP_USER, BACKUP_PREFIX.
+    env_file: product.settings
+    environment:
+      # The read-only role's password (DB_BACKUP_USER in product.settings): the
+      # backup container never holds the owner credential, so compromising it
+      # yields SELECT, not write/DDL on production.
+      PGPASSWORD: ${DB_BACKUP_PASSWORD:?DB_BACKUP_PASSWORD must be set}
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?BACKUP_PASSPHRASE must be set - backups are encrypted at rest}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      # Enforced whether or not the dump succeeded; see backup.sh's two prunes.
+      BACKUP_MAX_DAYS: ${BACKUP_MAX_DAYS:-55}
+      # Optional off-site copy of every dump and sidecar to an S3 bucket
+      # (Cloudflare R2). Unset, dumps stay on this host only.
+      BACKUP_R2_ENDPOINT: ${BACKUP_R2_ENDPOINT:-}
+      BACKUP_R2_BUCKET: ${BACKUP_R2_BUCKET:-}
+      BACKUP_R2_ACCESS_KEY_ID: ${BACKUP_R2_ACCESS_KEY_ID:-}
+      BACKUP_R2_SECRET_ACCESS_KEY: ${BACKUP_R2_SECRET_ACCESS_KEY:-}
+    volumes:
+      - ../ci-cd-library/deploy/backup:/scripts:ro
+      # Bind mount so the operator can rsync the encrypted dumps OFF this host;
+      # a backup that lives only next to the database it protects isn't one.
+      # BACKUP_DIR must be an ABSOLUTE operator-visible path once CD is on:
+      # the deployer runs compose from its own clone, where a relative
+      # ./backups would silently resolve to a VM-internal directory.
+      - ${BACKUP_DIR:-./backups}:/backups
+      # See the volume's note at the bottom: written here, read by the worker.
+      - backup-heartbeat:/heartbeat
+    # The image inherits the database image's VOLUME for its data directory.
+    # Nothing here writes there, but without a mount of our own docker made
+    # an anonymous volume for it on every recreate and never removed the old
+    # one: 463 of them, 22 GB, on 2026-09-15. A tmpfs in its place is empty,
+    # private and gone with the container.
+    tmpfs: [/var/lib/postgresql/data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    depends_on:
+      # The database service: must equal DB_SERVICE in product.settings.
+      db:
+        condition: service_healthy
+    # The script sleeps as process 1 with no handler for the stop signal, so
+    # docker waits the whole grace period and then kills it, and compose
+    # starts no new container until every old one is gone: at the ten second
+    # default, ten seconds of every release with the api down. A dump killed
+    # in flight is a .part, cleared at the next start.
+    stop_grace_period: 2s
+    restart: unless-stopped
+    logging: *log-bounds
+
+  logarchive:
+    # The backup image again (openssl, curl, tar): a nightly encrypted archive
+    # of every container's docker logs, kept 420 days; see backup/logarchive.sh.
+    build: ../ci-cd-library/deploy/backup
+    entrypoint: ["/bin/sh", "/scripts/logarchive.sh"]
+    # COMPOSE_PROJECT: only that project's containers are archived.
+    env_file: product.settings
+    environment:
+      # The same passphrase and bucket as the dumps; the archives land under
+      # the logs/ prefix, which carries its own lifecycle rule.
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?BACKUP_PASSPHRASE must be set - log archives are encrypted at rest}
+      BACKUP_R2_ENDPOINT: ${BACKUP_R2_ENDPOINT:-}
+      BACKUP_R2_BUCKET: ${BACKUP_R2_BUCKET:-}
+      BACKUP_R2_ACCESS_KEY_ID: ${BACKUP_R2_ACCESS_KEY_ID:-}
+      BACKUP_R2_SECRET_ACCESS_KEY: ${BACKUP_R2_SECRET_ACCESS_KEY:-}
+    volumes:
+      # The directory, not the file: a single-file bind mount keeps the inode
+      # it was started with, and the deployer's `git reset --hard` replaces
+      # the file, so a container mounted that way runs the OLD script until
+      # it is recreated. A directory mount sees the checkout as it is, which
+      # matters here because the deployer execs into this container.
+      - ../ci-cd-library/deploy/backup:/scripts:ro
+      # docker's container directories, read-only: the json-file logs live
+      # there and nowhere else. The mount also exposes every container's
+      # config.v2.json, which records its environment, so this container can
+      # read the whole stack's secrets, including the database owner's. That
+      # is why it sits on its own network below, off the stack's: the image
+      # ships psql, and a credential read here must not reach the database.
+      # It has no listener and no inbound path; the deployer already holds
+      # the same reach through the docker socket.
+      - /var/lib/docker/containers:/docker-logs:ro
+      # Beside the dumps, so one rsync takes both and BACKUP_DIR's rules
+      # (absolute, operator-visible) apply unchanged. Only ciphertext is ever
+      # written here; backup.sh's prunes match only its own file names.
+      - ${BACKUP_DIR:-./backups}/logs:/log-archive
+    # The inherited VOLUME again (see the backup service), and the staging
+    # directory: symlinks only, so it costs nothing and is gone with the
+    # container.
+    tmpfs: [/var/lib/postgresql/data, /stage]
+    # Outbound to R2 only; not the stack's network (see the mount above).
+    networks: [logarchive]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    # As the backup service: it sleeps as process 1 and is killed either way.
+    stop_grace_period: 2s
+    restart: unless-stopped
+    logging: *log-bounds
+
+  deployer:
+    build: ../ci-cd-library/deploy/deployer
+    profiles: [ops]
+    # Every product setting the loop needs; it refuses to start without them.
+    env_file: product.settings
+    environment:
+      # Default-empty rather than :? so compose commands work before the
+      # token exists; the deploy loop itself refuses to start without it.
+      GITHUB_DEPLOY_TOKEN: ${GITHUB_DEPLOY_TOKEN:-}
+      DEPLOY_POLL_SECONDS: ${DEPLOY_POLL_SECONDS:-90}
+      # Optional: a Telegram sendMessage URL (bot token + chat_id in it). The
+      # loop posts a message per deploy, per failing sha (once, then on
+      # recovery), per failed GitHub run on the ci branch, per site build
+      # that goes missing and when its own image no longer matches the
+      # repository; unset, it only logs.
+      DEPLOY_ALERT_URL: ${DEPLOY_ALERT_URL:-}
+      # How long the site build may take before it is reported missing.
+      DEPLOY_SITE_GRACE_SECONDS: ${DEPLOY_SITE_GRACE_SECONDS:-1500}
+      DEPLOY_ENV_DIR: /host-env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Identical path inside and out - compose bind-mount resolution depends
+      # on it (see deploy-loop.sh). Both sides must equal SRC_DIR in
+      # product.settings; it is written out because env_file does not interpolate.
+      - /srv/myproduct-src:/srv/myproduct-src
+      # Exactly the files the loop copies into the clone (ENV_FILES in
+      # product.settings, one mount each) - not the whole compose directory, which
+      # also holds the encrypted backups (and .env holds the passphrase that
+      # decrypts them; never hand both to one container).
+      - ./.env:/host-env/.env:ro
+      - ./app.env:/host-env/app.env:ro
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    logging: *log-bounds
+
+volumes:
+  # One file: the timestamp backup.sh writes after a verified dump. Written by
+  # the backup container, read by the product's worker, so the alarm for
+  # stopped backups needs no access to the dumps themselves.
+  backup-heartbeat:
+
+networks:
+  # The log archiver's own network: it needs the internet (R2) and nothing
+  # in the stack, and the stack must not be reachable from it.
+  logarchive:
