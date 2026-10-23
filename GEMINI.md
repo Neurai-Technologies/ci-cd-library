@@ -231,7 +231,7 @@ Planned layout:
   log-archive images. `deploy/restore.sh` and `deploy/restore-drill`: restore
   and the recorded drill. `deploy/vm`: the LaunchAgent VM autostart script
   and its installer.
-- `deploy/product.env.example`: every setting a product supplies, with
+- `deploy/product.settings.example`: every setting a product supplies, with
   obvious placeholders.
 - `checks/`: generic check tests.
 - `docs/ADOPT.md`: how a product adopts the library and bumps its tag.
@@ -241,9 +241,9 @@ Rules:
 - The repository is public. No product name, hostname, domain, Mac path,
   account or VM name, or secret appears anywhere in it: code, examples,
   tests, docs or commit messages.
-- Every product-specific value comes from `product.env`, kept in the product
-  repository. A new setting is added to `deploy/product.env.example` in the
-  same change.
+- Every product-specific value comes from `product.settings`, kept in the
+  product repository. A new setting is added to
+  `deploy/product.settings.example` in the same change.
 - Consumers pin the full commit SHA of a release tag, with a `# vX.Y.Z`
   comment, never the tag alone. Nothing changes in a product until it
   bumps the pin.

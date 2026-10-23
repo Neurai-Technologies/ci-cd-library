@@ -34,6 +34,9 @@ name: reusable-worker-deploy
 # them by name (not `secrets: inherit`); the deploy job sets the environment
 # and so receives its values. An unpassed secret resolves to an empty string
 # without an error, so the job checks for both before deploying.
+# The caller's ci workflow must trigger on `push: branches: [<deploy-branch>]`
+# only, never on tags: a tag named like the deploy branch would otherwise pass
+# the head_branch check.
 on:
   workflow_call:
     inputs:

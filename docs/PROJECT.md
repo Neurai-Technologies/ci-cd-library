@@ -27,5 +27,7 @@
     and default workflow permissions read-only;
   - confirm GitHub Pages is off.
 
+Adopting and updating the library in a product: [ADOPT.md](ADOPT.md).
+
 Use [DECISIONS.md](DECISIONS.md) for rationale and
 [DEPENDENCIES.md](DEPENDENCIES.md) for dependency records.

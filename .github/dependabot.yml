@@ -13,3 +13,24 @@ updates:
     open-pull-requests-limit: 3
     cooldown:
       default-days: 7
+  - package-ecosystem: docker
+    directory: /deploy/deployer
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /deploy/backup
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /deploy/restore-drill
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7

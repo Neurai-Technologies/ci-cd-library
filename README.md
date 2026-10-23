@@ -21,14 +21,16 @@ until it bumps the pin.
   Fetching a bare SHA from GitHub works for reachable commits (unverified
   here).
 
-The adoption steps will live in `docs/ADOPT.md`.
+Step-by-step adoption and updating: [docs/ADOPT.md](docs/ADOPT.md).
 
 ## What stays in the product repository
 
-The compose file, the Caddyfile, the LaunchAgent plist, `product.env` (every
-product-specific value; the library ships only `deploy/product.env.example`)
-and the product's own tests. This repository holds no product name,
-hostname, path or secret.
+`product.settings` (every product-specific value; the library ships only
+`deploy/product.settings.example`), the compose file, the Caddyfile, `.env`
+(secrets, never committed), the product's own tests and its hooks. The
+LaunchAgent plist is not kept there: the installer renders it from the
+library's template. This repository holds no product name, hostname, path
+or secret.
 
 ## Checks
 
