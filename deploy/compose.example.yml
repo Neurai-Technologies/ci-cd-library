@@ -3,9 +3,10 @@
 # the backup-heartbeat volume and the logarchive network); its database, API,
 # worker and proxy services stay its own.
 #
-# Paths below are relative to the product's compose file and assume it sits in
-# deploy/ with the library subtree at ci-cd-library/ (product.settings.example:
-# COMPOSE_DIR=deploy, LIBRARY_DIR=ci-cd-library); adjust both together.
+# The ../ci-cd-library paths below are relative to the product's compose
+# file. They assume LIBRARY_DIR=ci-cd-library sits next to the compose folder
+# (product.settings.example: COMPOSE_DIR=deploy, LIBRARY_DIR=ci-cd-library);
+# when LIBRARY_DIR or COMPOSE_DIR differs, adjust every such path to match.
 #
 # env_file sets each container's environment only. Compose does not use it
 # to interpolate ${...} in this file: those come from the project's .env, as

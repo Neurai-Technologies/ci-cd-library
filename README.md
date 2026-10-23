@@ -34,7 +34,7 @@ or secret.
 
 ## Checks
 
-`just ci` (Python 3.11+, Git, Gitleaks, `just`); see
+`just ci` (Python 3.11+ with pytest and PyYAML, Git, Gitleaks, `just`); see
 [docs/VERIFICATION.md](docs/VERIFICATION.md) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
 

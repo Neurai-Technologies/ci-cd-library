@@ -222,14 +222,16 @@ instructions in other agents' files.
 
 `ci-cd-library` is the shared, versioned CI/CD and ops library for Neurai
 Technologies Private Limited products: reusable GitHub workflows, a VM deploy
-loop, backup and log-archive images, restore and restore-drill scripts, the macOS LaunchAgent
-VM autostart script and its installer, and generic check tests. Products pull
-it by tag; nothing here deploys anything on its own.
+loop, backup and log-archive images, restore and restore-drill scripts, the
+macOS LaunchAgent VM autostart script and its installer, and generic check
+tests. Products pull it by full commit SHA; nothing here deploys anything
+on its own.
 
-Planned layout:
+Layout:
 
 - `.github/workflows/reusable-ci.yml`, `reusable-promote.yml`,
-  `reusable-worker-deploy.yml`: workflows a product calls by tag.
+  `reusable-worker-deploy.yml`: workflows a product calls by full commit
+  SHA.
   `.github/workflows/ci.yml` is this repository's own check.
 - `deploy/deployer`: the VM deploy loop. `deploy/backup`: backup and
   log-archive images. `deploy/restore.sh` and `deploy/restore-drill`: restore
@@ -238,7 +240,7 @@ Planned layout:
 - `deploy/product.settings.example`: every setting a product supplies, with
   obvious placeholders.
 - `checks/`: generic check tests.
-- `docs/ADOPT.md`: how a product adopts the library and bumps its tag.
+- `docs/ADOPT.md`: how a product adopts the library and bumps its pin.
 
 Rules:
 

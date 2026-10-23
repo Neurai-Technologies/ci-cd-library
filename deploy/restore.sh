@@ -37,7 +37,8 @@ set -o pipefail
 # BACKUP_HMAC_SALT must match backup.sh; changing it invalidates the .hmac
 # sidecar of every existing dump. Optional settings and their defaults follow:
 # RESTORE_SERVICE, like RESTORE_PROJECT, lets the drill name its own service.
-SERVICE="${RESTORE_SERVICE:-${DB_SERVICE:-postgres}}"
+: "${DB_SERVICE:?DB_SERVICE must be set (product.settings)}"
+SERVICE="${RESTORE_SERVICE:-$DB_SERVICE}"
 : "${BACKUP_HMAC_SALT:?BACKUP_HMAC_SALT must be set (product.settings)}"
 # openssl enc -S keeps only 8 bytes of salt, so a longer or shorter value would
 # not mean what it says; refuse anything but exactly 8 bytes.

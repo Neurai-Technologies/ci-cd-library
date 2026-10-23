@@ -1,7 +1,6 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Library baseline. Add the tests for checks/ and deploy/ here as they land.
-ci: docs paths bypasses secrets
+ci: docs paths bypasses secrets checks
 
 # One-time per clone, from a normal shell: hook shims, hooks path, tool warnings.
 setup:
@@ -25,6 +24,10 @@ bypasses:
 # GitHub CI scans the files of its clean checkout.
 secrets:
     if git rev-parse --verify HEAD >/dev/null 2>&1; then gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config .gitleaks.toml; else echo "No commits yet; nothing to scan (the pre-commit hook scans each staged change)."; fi
+
+# The library's check suite (pytest 9.1.1 and PyYAML 6.0.3; see docs/VERIFICATION.md).
+checks:
+    cd checks && python3 -m pytest -q
 
 # Copy the shared block from CLAUDE.md into the other agent files.
 sync-agents:

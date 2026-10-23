@@ -14,6 +14,7 @@ Without just, run the same steps explicitly:
 python3 scripts/check_docs.py
 git ls-files -z | bash scripts/sensitive-paths.sh
 test ! -e .gitleaksignore
+cd checks && python3 -m pytest -q
 ```
 
 Once commits exist, also run:
@@ -66,11 +67,21 @@ the remote are the enforcement. Hooks never stash or rewrite the working tree.
 
 ## Library checks
 
-The baseline above checks the repository itself. As code lands under
-`deploy/` and `checks/`, its tests (shell syntax, Python lint and tests,
-workflow and image build checks) are added to `just ci` and the CI workflow
-in the same change, with the commands and required versions documented here.
-Empty test discovery for implemented code is a failure.
+`just checks` (part of `just ci`) runs the suite under `checks/tests/`
+against `deploy/`, the workflows and the repository tooling. It needs
+pytest 9.1.1 and PyYAML 6.0.3 (the `dev` extra in `checks/pyproject.toml`),
+and Gitleaks on the PATH for the rule tests. Locally, install them in a
+virtual environment and put it first on the PATH:
+
+```sh
+python3 -m venv checks/.venv
+checks/.venv/bin/pip install pytest==9.1.1 pyyaml==6.0.3
+```
+
+GitHub CI installs the same two pins, plus pytest's own dependencies at
+fixed versions, with `--no-deps`, and runs the same command. New tests
+land in the same change as the code they cover. Empty test discovery for
+implemented code is a failure.
 
 Rules that hold for everything here:
 

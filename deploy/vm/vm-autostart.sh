@@ -44,7 +44,7 @@ set -eu
 # erasure check and its alert after an auto-restore.
 DATA_DISK_DEVICE="${DATA_DISK_DEVICE:-/dev/vdb1}"
 DEPLOYER_SERVICE="${DEPLOYER_SERVICE:-deployer}"
-DB_SERVICE="${DB_SERVICE:-postgres}"
+: "${DB_SERVICE:?DB_SERVICE must be set (product.settings)}"
 OPS_PROFILE="${OPS_PROFILE:-ops}"
 ERASURE_CHECK_SQL="${ERASURE_CHECK_SQL:-}"
 
@@ -91,7 +91,8 @@ FAILED_MARK="${APP_SUPPORT_DIR}/restore-failed"
 # something has been wrong for days and a human should decide.
 MAX_DUMP_AGE_HOURS="${MAX_DUMP_AGE_HOURS:-48}"
 # The database volume compose creates for the stack's postgres service.
-PGDATA_VOLUME="${COMPOSE_PROJECT}_${DB_VOLUME:-pgdata}"
+: "${DB_VOLUME:?DB_VOLUME must be set (product.settings)}"
+PGDATA_VOLUME="${COMPOSE_PROJECT}_${DB_VOLUME}"
 
 mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK")"
 exec >>"$LOG" 2>&1

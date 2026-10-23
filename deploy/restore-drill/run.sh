@@ -35,7 +35,8 @@ POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16.15-alpine}"
 : "${POSTGRES_INIT_DIR:?}"
 export PRODUCT_SETTINGS POSTGRES_IMAGE DB_USER DB_NAME
 BACKUP_CONTAINER="${COMPOSE_PROJECT}-backup-1"
-LIVE_POSTGRES="${COMPOSE_PROJECT}-${DB_SERVICE:-postgres}-1"
+: "${DB_SERVICE:?DB_SERVICE must be set (product.settings)}"
+LIVE_POSTGRES="${COMPOSE_PROJECT}-${DB_SERVICE}-1"
 COMPOSE=(docker compose -p drill -f "$HERE/docker-compose.yml")
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/restore-drill.XXXXXX")"
 LOG="$WORK/restore.log"

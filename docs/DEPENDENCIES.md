@@ -55,4 +55,25 @@ before updating.
 | Asset | Version | SHA-256 | Purpose | Licence / evidence | Attribution fields | Review date |
 | --- | --- | --- | --- | --- | --- | --- |
 
+## Tools, actions and images
+
+Run unmodified as separate processes: in CI, in the check suite, or as the
+base of the deploy images. None is vendored. Licences marked "upstream"
+were not checked here; the Python ones were read from the installed
+packages' metadata on 2026-10-23.
+
+| Component | Version / pin | Used by | Licence |
+| --- | --- | --- | --- |
+| pytest | 9.1.1 | check suite | MIT (metadata) |
+| PyYAML | 6.0.3 | check suite | MIT (metadata) |
+| iniconfig, packaging, pluggy, Pygments | 2.3.1, 26.3, 1.7.0, 2.21.0 | pytest's dependencies in CI | MIT; Apache-2.0 OR BSD-2-Clause; MIT; BSD-2-Clause (metadata) |
+| wrangler | 4.131.1 (`wrangler-version` input, run through npx) | reusable-worker-deploy | MIT OR Apache-2.0 (upstream) |
+| actions/checkout | v4.4.0 and v7.0.1, by commit SHA | workflows | MIT (upstream) |
+| actions/setup-python | v5.6.0, by commit SHA | workflows | MIT (upstream) |
+| actions/setup-node | v4.4.0, by commit SHA | reusable workflows | MIT (upstream) |
+| pnpm/action-setup | v4.3.0, by commit SHA | reusable workflows | MIT (upstream) |
+| Gitleaks | 8.30.1, by SHA-256 | CI, hooks, check suite | MIT (upstream) |
+| postgres image | 16.15-alpine | backup and restore-drill images | PostgreSQL Licence (upstream) |
+| docker image | 27-cli, by digest | deployer image | Apache-2.0 (upstream) |
+
 This document is not a licence grant.

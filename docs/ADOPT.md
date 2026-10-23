@@ -125,7 +125,7 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    CODEOWNERS covering the hooks, `product.settings`, the compose file and
    `.github/`; only owners merge. Under promote, `main` gets a ruleset that
    blocks force-push and deletion and lets only the promote token's actor
-   (deploy key or fine-grained PAT) push; a PR rule would refuse promotion.
+   (fine-grained PAT or GitHub App token) push; a PR rule would block it.
 6. Add the promote caller from the header of
    `.github/workflows/reusable-promote.yml` at the pinned SHA. The tests
    workflow it waits for triggers on `push: branches: [<source-branch>]`
@@ -139,11 +139,11 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    bash <LIBRARY_DIR>/deploy/vm/install-autostart.sh <ORIGIN_URL> <path to product.settings>
    ```
 
-   Run it from a fresh clone of `<ORIGIN_URL>`'s main, outside any folder
-   an agent can write, never from the working tree: the installer verifies
-   its sibling files, not itself. At the very least, fetch first and check
-   that `git diff origin/main -- <LIBRARY_DIR>` prints nothing.
-
+   Run it from the checkout at `REPO_DIR`: the installer refuses any other
+   checkout, and the login job runs restore.sh and compose from there.
+   Keep that checkout outside agent-writable folders where possible. The
+   installer verifies its sibling files, not itself, so first fetch and
+   confirm `git diff origin/main --stat -- <LIBRARY_DIR>` prints nothing.
    It checks its files against a fresh clone of `<ORIGIN_URL>`'s main,
    then loads the LaunchAgent, which runs at once. `APP_SUPPORT_DIR` must
    be under `~/Library`. Before running it:
@@ -160,8 +160,8 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    PRODUCT_SETTINGS=<path>/product.settings bash <LIBRARY_DIR>/deploy/restore-drill/run.sh
    ```
 
-   Run it from a fresh clone, as the installer; again after any change to
-   the backup, restore, the init scripts or the database image.
+   Run it from the checkout at `REPO_DIR` after the same `git diff` check;
+   again after any change to backup, restore, init scripts or the image.
 9. Run the library's checks with pytest and PyYAML (the `dev` extra in
    `<LIBRARY_DIR>/checks/pyproject.toml`):
 
