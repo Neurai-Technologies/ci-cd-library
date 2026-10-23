@@ -1,0 +1,204 @@
+name: reusable-worker-deploy
+
+# Deploys one Cloudflare Worker with wrangler. The caller triggers this after
+# its checks pass on deploy-branch. The job itself only runs for a successful
+# workflow_run of a push to deploy-branch in this same repository (a fork
+# branch can be named main), or for a push to deploy-branch, and it deploys
+# only that event's sha (inputs.ref must equal the run's head_sha, or
+# github.sha on push). The GitHub environment does not limit which sha deploys; this
+# guard does. For example, after ci succeeds on main:
+#
+#   on:
+#     workflow_run:
+#       workflows: [ci]
+#       types: [completed]
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     deploy:
+#       if: >-
+#         github.event.workflow_run.conclusion == 'success'
+#         && github.event.workflow_run.event == 'push'
+#         && github.event.workflow_run.head_branch == 'main'
+#         && github.event.workflow_run.head_repository.full_name == github.repository
+#       uses: <owner>/ci-cd-library/.github/workflows/reusable-worker-deploy.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#       with:
+#         ref: ${{ github.event.workflow_run.head_sha }}
+#       secrets:
+#         cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#
+# The secrets live in the GitHub environment named by `environment`, whose only
+# deployment branch is main, never in repository secrets. The caller passes
+# them by name (not `secrets: inherit`); the deploy job sets the environment
+# and so receives its values. An unpassed secret resolves to an empty string
+# without an error, so the job checks for both before deploying.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build and deploy. It must be github.event.workflow_run.head_sha on workflow_run and github.sha on push; empty means that sha.
+        type: string
+        required: false
+        default: ""
+      deploy-branch:
+        description: The only branch whose commits deploy.
+        type: string
+        required: false
+        default: main
+      working-directory:
+        description: Folder wrangler runs in, relative to the repository root.
+        type: string
+        required: false
+        default: .
+      wrangler-config:
+        description: Wrangler config file, relative to working-directory.
+        type: string
+        required: false
+        default: wrangler.jsonc
+      environment:
+        description: GitHub environment holding the Cloudflare secrets.
+        type: string
+        required: false
+        default: production
+      node-version:
+        description: Node version for install, build and wrangler.
+        type: string
+        required: false
+        default: "22"
+      wrangler-version:
+        description: Exact wrangler version run through npx, so the repository need not depend on it.
+        type: string
+        required: false
+        default: 4.131.1
+      build-command:
+        description: Shell command run from the repository root after install, before the deploy. Empty skips it.
+        type: string
+        required: false
+        default: ""
+    secrets:
+      cloudflare-api-token:
+        required: true
+      cloudflare-account-id:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_repository.full_name == github.repository
+        && github.event.workflow_run.head_branch == inputs.deploy-branch
+        && github.event.workflow_run.conclusion == 'success')
+      || (github.event_name == 'push'
+        && github.ref == format('refs/heads/{0}', inputs.deploy-branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: ${{ inputs.environment }}
+    # One deploy per Worker config at a time, and a running one is never cut
+    # short: a newer commit waits its turn.
+    concurrency:
+      group: reusable-worker-deploy-${{ github.repository }}-${{ inputs.environment }}-${{ inputs.working-directory }}-${{ inputs.wrangler-config }}
+      cancel-in-progress: false
+    steps:
+      # The only sha that may deploy: the checked run's head_sha on
+      # workflow_run, github.sha on push. An empty ref means that sha.
+      - name: Check the inputs
+        id: inputs
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ inputs.ref }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          PUSH_SHA: ${{ github.sha }}
+          WRANGLER_VERSION: ${{ inputs.wrangler-version }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            expected="$RUN_SHA"
+          else
+            expected="$PUSH_SHA"
+          fi
+          ref="${REF:-$expected}"
+          if [ "$ref" != "$expected" ]; then
+            echo "ref ($ref) must equal the $EVENT_NAME sha ($expected)."
+            exit 1
+          fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+          if ! [[ "$WRANGLER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "wrangler-version must be an exact X.Y.Z version, got: $WRANGLER_VERSION"
+            exit 1
+          fi
+      - name: Require the Cloudflare secrets
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.cloudflare-api-token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.cloudflare-account-id }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "cloudflare-api-token or cloudflare-account-id is empty: pass both by name from the $ENVIRONMENT environment."
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.inputs.outputs.sha }}
+          persist-credentials: false
+      # The package manager follows the lockfile at the repository root.
+      - name: Detect the package manager
+        id: pm
+        shell: bash
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "name=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then
+            echo "name=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "No pnpm-lock.yaml or package-lock.json at the repository root."
+            exit 1
+          fi
+      # Reads the pnpm version from packageManager in the root package.json.
+      - name: Set up pnpm
+        if: steps.pm.outputs.name == 'pnpm'
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.pm.outputs.name }}
+      - name: Install dependencies
+        shell: bash
+        env:
+          PM: ${{ steps.pm.outputs.name }}
+        run: |
+          if [ "$PM" = pnpm ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+      - name: Build
+        if: inputs.build-command != ''
+        shell: bash
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: bash -euo pipefail -c "$BUILD_COMMAND"
+      # npx runs the pinned wrangler from its own cache and touches nothing in
+      # the tree. The deploy message is the commit, so Cloudflare's deployment
+      # list shows what each version serves.
+      - name: Deploy
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.cloudflare-api-token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.cloudflare-account-id }}
+          WRANGLER_SEND_METRICS: "false"
+          WRANGLER_VERSION: ${{ inputs.wrangler-version }}
+          WRANGLER_CONFIG: ${{ inputs.wrangler-config }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          npx -y "wrangler@$WRANGLER_VERSION" deploy --config "$WRANGLER_CONFIG" --message "$sha"

@@ -1,0 +1,191 @@
+name: reusable-promote
+
+# Fast-forwards the target branch (main) to a source-branch (ci) sha once every
+# Actions run on that sha is green, so pushing to the source branch is the
+# release action. The caller triggers it when its tests workflow completes:
+#
+#   on:
+#     workflow_run:
+#       workflows: [tests]
+#       types: [completed]
+#   permissions:
+#     contents: read
+#     actions: read
+#   jobs:
+#     promote:
+#       uses: <owner>/ci-cd-library/.github/workflows/reusable-promote.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#       with:
+#         tests-workflow: .github/workflows/tests.yml
+#       secrets:
+#         push-token: ${{ secrets.PROMOTE_PUSH_TOKEN }}
+#
+# push-token is passed by name, never with `secrets: inherit` (which works only
+# inside one organisation or enterprise). The caller keeps it in a GitHub
+# environment whose only deployment branch is the target branch, and names that
+# environment in the `environment` input: the push job sets it, and so receives
+# the environment's value. The environment only holds the secret; it does not
+# limit which sha is promoted (a workflow_run job runs on the default branch,
+# so its branch rule always passes). The gate job below limits that.
+# The caller's tests workflow must trigger on `push: branches: [<source-branch>]`
+# only, never on tags: a tag named like the source branch would otherwise pass
+# the head_branch check. A secret the caller does not pass resolves to an
+# empty string without an error, so the push job checks for one. A push made
+# with this token, unlike one made with GITHUB_TOKEN, starts the workflows that
+# run on pushes to the target branch.
+on:
+  workflow_call:
+    inputs:
+      source-branch:
+        description: Branch whose green shas are promoted.
+        type: string
+        required: false
+        default: ci
+      target-branch:
+        description: Branch that is fast-forwarded.
+        type: string
+        required: false
+        default: main
+      tests-workflow:
+        description: Path of the caller's test workflow whose green push run on the sha is required, e.g. .github/workflows/tests.yml. A path, not a display name, because names live in the files at the sha under evaluation.
+        type: string
+        required: true
+      post-release-workflows:
+        description: Space-separated workflow paths that run after a release and are not evidence for it (at least the caller's promote workflow).
+        type: string
+        required: false
+        default: .github/workflows/promote.yml
+      environment:
+        description: GitHub environment holding push-token; its only deployment branch is the target branch.
+        type: string
+        required: false
+        default: production
+    secrets:
+      push-token:
+        description: Token allowed to push the target branch, stored in the environment named above.
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    name: require every run on this sha green
+    # Only push-event successes from the caller's own source branch. The event
+    # check is load-bearing: head_branch alone would also match a pull_request
+    # run from a fork branch with the same name, whose workflow files the fork
+    # author wrote.
+    if: >-
+      github.event_name == 'workflow_run'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && github.event.workflow_run.head_branch == inputs.source-branch
+      && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Serialised per sha, never cancelled: two near-simultaneous completions
+    # cannot race the push (the second is a no-op fast-forward anyway).
+    concurrency:
+      group: reusable-promote-${{ github.repository }}-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+    steps:
+      # Gate code comes from the library at the called ref, not candidate code.
+      - name: Checkout ci-cd-library at the called ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ci-cd-library
+          persist-credentials: false
+      # ci-gate.sh reads ci-policy.json from its own folder, so the policy
+      # built from the inputs goes beside a copy of the gate.
+      - name: Write the release policy
+        shell: bash
+        env:
+          TESTS_WORKFLOW: ${{ inputs.tests-workflow }}
+          SOURCE_BRANCH: ${{ inputs.source-branch }}
+          TARGET_BRANCH: ${{ inputs.target-branch }}
+          POST_RELEASE: ${{ inputs.post-release-workflows }}
+        run: |
+          set -euo pipefail
+          gate="$RUNNER_TEMP/ci-gate"
+          mkdir -p "$gate"
+          cp ci-cd-library/deploy/deployer/ci-gate.sh ci-cd-library/deploy/deployer/ci-gate.jq "$gate/"
+          jq -n --arg tests "$TESTS_WORKFLOW" --arg source "$SOURCE_BRANCH" --arg target "$TARGET_BRANCH" \
+            --arg post "$POST_RELEASE" \
+            '{required_workflows: [$tests], release_branches: [$source, $target],
+              post_release_workflows: ($post | split(" ") | map(select(. != "")))}' > "$gate/ci-policy.json"
+          cat "$gate/ci-policy.json"
+      - name: Require every run on this sha green
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_TELEMETRY: "false"
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # "dynamic" runs are GitHub-generated and can sit queued forever; the
+          # gate excludes them. The listing can lag the run that triggered this
+          # job, so while the ONLY blockers are a missing or incomplete listing,
+          # ask again, up to six times. A run that is red, still pending, or
+          # from another commit blocks at once.
+          for attempt in 1 2 3 4 5 6; do
+            resp=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100")
+            if verdict=$(printf '%s' "$resp" | bash "$RUNNER_TEMP/ci-gate/ci-gate.sh" "$SHA" "$REPO" 2>&1 >/dev/null); then
+              printf '%s\n' "$verdict"
+              echo "go=yes" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            printf '%s\n' "$verdict"
+            transient=$(jq -r '(.blockers | length) as $n | [.blockers[] | select(startswith("Missing required release push:") or startswith("Incomplete Actions response"))] | length == $n and $n > 0' <<< "$verdict" 2>/dev/null || echo false)
+            if [ "$transient" = "true" ] && [ "$attempt" -lt 6 ]; then
+              echo "The run listing has not caught up yet; asking again in 10s (attempt $attempt of 6)."
+              sleep 10
+              continue
+            fi
+            echo "Release blocked. See the gate's explicit blockers in this step's log." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          done
+
+  promote:
+    name: fast-forward the target branch
+    needs: gate
+    if: needs.gate.outputs.go == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only this job names the environment, so the push token reaches nothing
+    # but the checkout and the push below.
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: reusable-promote-push-${{ github.repository }}-${{ inputs.target-branch }}
+      cancel-in-progress: false
+    steps:
+      - name: Require the push token
+        shell: bash
+        env:
+          PUSH_TOKEN: ${{ secrets.push-token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [ -z "$PUSH_TOKEN" ]; then
+            echo "push-token is empty: pass it by name from the $ENVIRONMENT environment."
+            exit 1
+          fi
+      # v7 refuses fork-PR code in workflow_run contexts, backstopping the
+      # gate job's event guard. Credentials persist: the push step needs them.
+      - name: Checkout the gated sha
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          token: ${{ secrets.push-token }}
+      # Plain push, never --force: git refuses a non-fast-forward, so a
+      # diverged target branch fails loudly here instead of losing commits.
+      - name: Fast-forward the target branch
+        shell: bash
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TARGET_BRANCH: ${{ inputs.target-branch }}
+        run: git push origin "$SHA:refs/heads/$TARGET_BRANCH"

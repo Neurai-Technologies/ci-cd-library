@@ -1,0 +1,179 @@
+name: reusable-ci
+
+# Baseline checks for a caller repository: secret scan of the files and the
+# full history, documentation check, Pages check, then the caller's own test
+# command. Call it at a release tag's full commit sha:
+#   uses: <owner>/ci-cd-library/.github/workflows/reusable-ci.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+# A caller without scripts/check_docs.py and scripts/sensitive-paths.sh must
+# set require-repo-scripts: false, or the job fails.
+# Actions are pinned to a commit; the trailing comment is the release each sha
+# was. Bump by resolving the tag again, never by writing a tag back.
+on:
+  workflow_call:
+    inputs:
+      test-command:
+        description: Shell command run from the repository root after the checks, e.g. `just ci` or `pnpm test`. Empty skips it.
+        type: string
+        required: false
+        default: ""
+      pages-check:
+        description: Fail while GitHub Pages is on (on a private repository its site is public).
+        type: boolean
+        required: false
+        default: true
+      pages-allowed:
+        description: Only the owner sets this to true, for a website that publishes built files only, with an entry in docs/DECISIONS.md; an agent never sets it to make CI pass.
+        type: boolean
+        required: false
+        default: false
+      fetch-depth:
+        description: Commits to fetch. 0 (all) is what the history scan needs; anything else scans only what was fetched.
+        type: number
+        required: false
+        default: 0
+      python-version:
+        description: Python for the test command, e.g. "3.12". Empty skips setup-python.
+        type: string
+        required: false
+        default: ""
+      node-version:
+        description: Node for the test command, e.g. "22". Empty skips setup-node.
+        type: string
+        required: false
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        required: false
+        default: 15
+      require-repo-scripts:
+        description: Fail when the repository lacks scripts/check_docs.py or scripts/sensitive-paths.sh. False skips a missing one with a log line.
+        type: boolean
+        required: false
+        default: true
+      concurrency-key:
+        description: Appended to the concurrency group, so two calls from one caller workflow do not cancel each other.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Prefixed so it never equals the caller's own group: the same group with
+    # cancel-in-progress in caller and called workflow cancels the run itself.
+    # github.workflow is the caller's workflow name here.
+    concurrency:
+      group: reusable-ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency-key }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+          persist-credentials: false
+      # The library at the exact commit the caller's pinned sha names:
+      # job.workflow_repository and job.workflow_sha name the reusable workflow
+      # file that defines this job, not the caller's workflow.
+      - name: Checkout ci-cd-library at the called ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-cd-library
+          persist-credentials: false
+      # Copied out and removed so the caller's tree stays clean: the secret
+      # scan, git status and the test command see only the caller's files.
+      - name: Stage library files outside the workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-cd-library"
+          cp .ci-cd-library/.gitleaks.toml "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
+          rm -rf .ci-cd-library
+      - name: Check scanner bypasses
+        run: test ! -e .gitleaksignore
+      - name: Install checksum-pinned Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/gitleaks-bin"
+          mkdir -p "$target"
+          curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$target/gitleaks.tar.gz"
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$target/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$target/gitleaks.tar.gz" -C "$target" gitleaks
+          printf '%s\n' "$target" >> "$GITHUB_PATH"
+      # Before any caller script runs, and always with the library's config:
+      # a caller's own .gitleaks.toml could weaken the rules it is scanned by.
+      - name: Scan current files
+        run: gitleaks dir . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
+      - name: Scan full history
+        run: gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
+      # The caller's own scripts/check_docs.py only: the library's copy checks
+      # the tree it sits in (ROOT is its own parent folder), so it cannot check
+      # a caller. A missing script fails the job unless require-repo-scripts is
+      # false, which skips it with a log line.
+      - name: Check documentation
+        shell: bash
+        env:
+          REQUIRE_REPO_SCRIPTS: ${{ inputs.require-repo-scripts }}
+        run: |
+          if [ -f scripts/check_docs.py ]; then
+            python3 scripts/check_docs.py
+          elif [ "$REQUIRE_REPO_SCRIPTS" = true ]; then
+            echo "scripts/check_docs.py is missing. Add it, or set require-repo-scripts: false to skip the docs check."
+            exit 1
+          else
+            echo "No scripts/check_docs.py in this repository; docs check skipped."
+          fi
+      - name: Check sensitive paths
+        shell: bash
+        env:
+          REQUIRE_REPO_SCRIPTS: ${{ inputs.require-repo-scripts }}
+        run: |
+          set -euo pipefail
+          if [ -f scripts/sensitive-paths.sh ]; then
+            git ls-files -z | bash scripts/sensitive-paths.sh
+          elif [ "$REQUIRE_REPO_SCRIPTS" = true ]; then
+            echo "scripts/sensitive-paths.sh is missing. Add it, or set require-repo-scripts: false to skip the sensitive-path check."
+            exit 1
+          else
+            echo "No scripts/sensitive-paths.sh in this repository; sensitive-path check skipped."
+          fi
+      # has_pages comes with the repository's metadata, which this token can
+      # always read; any answer but false or an allowed true fails the step.
+      - name: Check GitHub Pages is off
+        if: inputs.pages-check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_TELEMETRY: "false"
+          REPO: ${{ github.repository }}
+          PAGES_ALLOWED: ${{ inputs.pages-allowed }}
+        run: |
+          set -euo pipefail
+          pages=$(gh api "repos/$REPO" --jq .has_pages)
+          if [ "$pages" = false ]; then exit 0; fi
+          if [ "$pages" = true ] && [ "$PAGES_ALLOWED" = true ]; then exit 0; fi
+          echo "GitHub Pages is on for $REPO (has_pages: $pages), and on a private repository its site is public. If it had its own custom domain, first delete the DNS records of that name, with and without www., that point at GitHub (keep the verification TXT record) and wait out their TTL. Then turn it off: Pages source None in Settings, or gh api -X DELETE repos/$REPO/pages. Only the owner sets pages-allowed, with a docs/DECISIONS.md entry."
+          exit 1
+      - name: Set up Python
+        if: inputs.python-version != ''
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Set up Node
+        if: inputs.node-version != ''
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Run test command
+        if: inputs.test-command != ''
+        shell: bash
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: bash -euo pipefail -c "$TEST_COMMAND"
