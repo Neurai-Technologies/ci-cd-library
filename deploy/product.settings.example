@@ -77,6 +77,10 @@ SITE_RELEASE_HOOK=deploy/site-release.sh
 
 # Read-only database role the backup service dumps as.
 DB_BACKUP_USER=myproduct_backup
+# Days the encrypted log archives are kept locally. Default: 420.
+LOG_ARCHIVE_KEEP_DAYS=420
+# Compose project whose containers' logs are archived. Default: COMPOSE_PROJECT.
+LOG_ARCHIVE_PROJECT=myproduct
 
 # ---- VM and restore --------------------------------------------------------
 

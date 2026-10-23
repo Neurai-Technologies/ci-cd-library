@@ -1,0 +1,22 @@
+[project]
+name = "ci-cd-library-checks"
+version = "0.1.0"
+description = "ci-cd-library - generic check tests for deploy/, the workflows and the repository tooling"
+# Proprietary - see LICENSE at the repo root. No rights granted.
+license = { text = "LicenseRef-Proprietary" }
+classifiers = ["License :: Other/Proprietary License"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    # The compose and workflow tests read YAML.
+    "pyyaml==6.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110

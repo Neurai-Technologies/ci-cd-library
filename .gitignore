@@ -11,6 +11,8 @@ Desktop.ini
 *.log
 logs/
 tmp/
+# The product and owner names checks/ bans; listing them in the repo would publish them.
+checks/banned-words.local
 .idea/
 *.iml
 .vscode/*

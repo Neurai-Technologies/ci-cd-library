@@ -1,0 +1,712 @@
+"""A backup must be tamper-evident, and a restore must prove the file whole before psql sees it.
+
+backup.sh and restore.sh run in different places (the backup container, the
+host), so they each carry the same key derivation; the first tests pin them to
+each other. The rest drive the real scripts with the real openssl and gzip, a
+fake pg_dump, and a fake docker that records what would have reached psql.
+backup.sh reads the product settings from its environment (env_file:
+product.settings); restore.sh sources the product.settings PRODUCT_SETTINGS names.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shlex
+import shutil
+import subprocess
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from conftest import LIBRARY_ROOT, ProductSettings
+from tests.shell import fake, lift
+
+BACKUP = LIBRARY_ROOT / "deploy" / "backup" / "backup.sh"
+RESTORE = LIBRARY_ROOT / "deploy" / "restore.sh"
+PASSPHRASE = "correct horse battery staple"
+# The erasure query the tests configure, and what the fake docker answers it
+# with, so a test can assert the value reached the warning rather than that
+# some text did.
+ERASURE_SQL = "select max(created_at) from deletion_requests"
+FAKE_ERASURE_AT = "2026-09-11 04:00:00+00"
+# Shaped like real pg_dump 16 output, including the \restrict / \unrestrict
+# lines newer releases add, and incompressible enough that the gzipped,
+# encrypted dump clears backup.sh's 1KB floor.
+FAKE_DUMP = (
+    "--\n-- PostgreSQL database dump\n--\n\n\\restrict 27aJ1fET0VNu2nqqzdCOrNDKzrHcPsXLtQ\n\n"
+    "-- Dumped from database version 16.15\n\n"
+    + "".join(
+        f"INSERT INTO accounts VALUES ({i}, '{hashlib.sha256(bytes([i])).hexdigest()}');\n" for i in range(80)
+    )
+    + "\n--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict 27aJ1fET0VNu2nqqzdCOrNDKzrHcPsXLtQ\n\n"
+)
+
+
+def functions(script: Path, names: tuple[str, ...]) -> str:
+    return "\n".join(lift(script, name) for name in names)
+
+
+def hmac_via(script: Path, path: Path, salt: str) -> str:
+    code = f"{functions(script, ('mac_key', 'hmac_of'))}\nhmac_of {shlex.quote(str(path))}"
+    return subprocess.check_output(
+        ["bash", "-c", code],
+        text=True,
+        env={**os.environ, "BACKUP_PASSPHRASE": PASSPHRASE, "BACKUP_HMAC_SALT": salt},
+    ).strip()
+
+
+@pytest.fixture
+def env(product_settings: Callable[..., ProductSettings]) -> ProductSettings:
+    """A product with an erasure record to check after a restore."""
+    return product_settings(ERASURE_CHECK_SQL=ERASURE_SQL)
+
+
+def dumps(root: Path, env: ProductSettings, suffix: str = "") -> list[Path]:
+    return sorted(root.glob(f"{env.values['BACKUP_PREFIX']}-*.sql.gz.enc{suffix}"))
+
+
+def run_backup(
+    tmp_path: Path, env: ProductSettings, dump_fails: bool = False, **extra_env: str
+) -> tuple[Path, subprocess.CompletedProcess]:
+    """Run backup.sh once for real: fake pg_dump, real gzip and openssl, a fake
+    curl that records what it would have uploaded, and a fake sleep that ends
+    the loop after the first dump.
+
+    dump_fails drives the case retention was blind to: the database is too
+    broken to dump, so the success branch never runs.
+    """
+    bin_dir = tmp_path / "bin"
+    calls = tmp_path / "curl-calls"
+    fake(
+        bin_dir,
+        "pg_dump",
+        "echo 'pg_dump: connection failed' >&2\nexit 1\n" if dump_fails else "printf '%s' \"$FAKE_DUMP\"\n",
+    )
+    fake(bin_dir, "sleep", "kill $PPID\n")
+    if not (bin_dir / "curl").exists():
+        fake(
+            bin_dir,
+            "curl",
+            f'printf "argv: %s\\n" "$*" >>"{calls}"\nprintf "stdin: %s\\n" "$(cat)" >>"{calls}"\n',
+        )
+    out = tmp_path / "backups"
+    out.mkdir(exist_ok=True)
+    run_env = {
+        **os.environ,
+        **env.values,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "BACKUP_PASSPHRASE": PASSPHRASE,
+        "BACKUP_ROOT": str(out),
+        "BACKUP_HEARTBEAT": str(tmp_path / "no-heartbeat-dir" / "last-success"),
+        "FAKE_DUMP": FAKE_DUMP,
+        **extra_env,
+    }
+    # bash, not sh: the container runs busybox ash, which accepts the script's
+    # pipefail; the Ubuntu runner's sh is dash, which does not.
+    result = subprocess.run(["bash", str(BACKUP)], env=run_env, capture_output=True, text=True, check=False)
+    if dump_fails:
+        assert "backup FAILED" in result.stderr, result.stdout
+    else:
+        assert "backup written" in result.stdout, result.stderr
+    return out, result
+
+
+@pytest.fixture
+def backup_dir(tmp_path: Path, env: ProductSettings) -> Path:
+    return run_backup(tmp_path, env)[0]
+
+
+def restore(
+    tmp_path: Path,
+    env: ProductSettings,
+    dump: Path,
+    path_prefix: str = "",
+    erasure_out: str = FAKE_ERASURE_AT,
+    erasure_err: str = "",
+    erasure_code: int = 0,
+    break_notice: bool = False,
+    break_cleanup: bool = False,
+    close_stdout: bool = False,
+    **extra_env: str,
+) -> tuple[subprocess.CompletedProcess, Path]:
+    bin_dir = tmp_path / "restore-bin"
+    received = tmp_path / "psql-stdin"
+    # restore.sh calls docker twice: the piped psql that applies the dump, and
+    # a read-only query (-tAc) for the erasure boundary. They are told apart by
+    # argv rather than by whether stdin happens to be empty - the query must
+    # ANSWER, and it must not read stdin at all (it runs inside $( ) with no
+    # redirect, so it inherits the script's fd 0 and would block for ever
+    # under `pytest -s`).
+    fake(
+        bin_dir,
+        "docker",
+        f'printf "argv: %s\\n" "$*" >>"{received}.argv"\n'
+        'case " $* " in *" -tAc "*)'
+        # What is still in TMPDIR at boundary time. The decrypted dump is the
+        # whole database in cleartext and must already be gone; the file the
+        # boundary writes its stderr to is named after it, so the assertion is
+        # about the suffix rather than the glob.
+        f' ls "$TMPDIR"/{env.values["PRODUCT"]}-restore.* >"{received}.tmpfiles" 2>/dev/null || true;'
+        f" printf '%s' {shlex.quote(erasure_out)};"
+        f" printf '%s' {shlex.quote(erasure_err)} >&2;"
+        f" exit {erasure_code};; esac\n"
+        f'/bin/cat >"{received}"\n',
+    )
+    run_env = {
+        **os.environ,
+        "PATH": ":".join(p for p in (str(bin_dir), path_prefix, os.environ["PATH"]) if p),
+        "PRODUCT_SETTINGS": str(env.path),
+        "BACKUP_PASSPHRASE": PASSPHRASE,
+        "TMPDIR": str(tmp_path),
+        **extra_env,
+    }
+    # A write that fails after the database has been written. The notice is a
+    # heredoc through `cat`, so a cat that refuses is exactly that failure,
+    # and it reaches nothing else: the fake docker above calls /bin/cat.
+    if break_notice:
+        fake(bin_dir, "cat", "exit 1\n")
+    # An unlink that fails - a read-only or full filesystem, which is the
+    # condition a restore runs under. rm -f returns 0 for a MISSING file, so
+    # only a stub reproduces the case the guards exist for.
+    if break_cleanup:
+        fake(bin_dir, "rm", "exit 1\n")
+    # fd 1 closed. The completion echo is the script's only stdout write, so
+    # this fails exactly that one command and nothing else.
+    streams: dict[str, object] = (
+        {"stderr": subprocess.PIPE, "preexec_fn": lambda: os.close(1)}
+        if close_stdout
+        else {"capture_output": True}
+    )
+    result = subprocess.run(["bash", str(RESTORE), str(dump)], env=run_env, text=True, check=False, **streams)
+    return result, received
+
+
+def plaintext_left(tmp_path: Path, env: ProductSettings) -> list[Path]:
+    return list(tmp_path.glob(f"{env.values['PRODUCT']}-restore.*"))
+
+
+def aged_dump(root: Path, days: int, name: str) -> Path:
+    """A dump file that looks `days` old to find(1)."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    path.write_bytes(b"x" * 2048)
+    old = time.time() - days * 86400
+    os.utime(path, (old, old))
+    return path
+
+
+def test_a_failed_dump_still_expires_what_is_past_the_ceiling(tmp_path: Path, env: ProductSettings) -> None:
+    """Retention used to live only in the success branch, so a database too
+    broken to dump was one whose old dumps stopped expiring - personal data
+    outliving the published window in the one case nobody is watching."""
+    root = tmp_path / "backups"
+    prefix = env.values["BACKUP_PREFIX"]
+    stale = aged_dump(root, 60, f"{prefix}-20260722-000000.sql.gz.enc")
+    stale_sidecar = aged_dump(root, 60, f"{prefix}-20260722-000000.sql.gz.enc.hmac")
+    recent = aged_dump(root, 3, f"{prefix}-20260918-000000.sql.gz.enc")
+
+    run_backup(tmp_path, env, dump_fails=True)
+
+    assert not stale.exists(), "a dump past the ceiling survived a failed run"
+    assert not stale_sidecar.exists(), "the sidecar outlived its dump"
+    assert recent.exists(), "the ceiling took a dump that was well inside it"
+
+
+def test_the_ceiling_leaves_the_operator_room_to_notice(tmp_path: Path, env: ProductSettings) -> None:
+    """The ordinary window is 14 days and the ceiling is 55. A month of failed
+    dumps must not clear the history out: that is the case where the operator
+    most needs something to restore from."""
+    month_old = aged_dump(
+        tmp_path / "backups", 30, f"{env.values['BACKUP_PREFIX']}-20260822-000000.sql.gz.enc"
+    )
+
+    run_backup(tmp_path, env, dump_fails=True)
+
+    assert month_old.exists(), "a month of failures left nothing to restore from"
+
+
+def test_a_good_dump_still_prunes_at_the_ordinary_window(tmp_path: Path, env: ProductSettings) -> None:
+    """The second prune must not have replaced the first one."""
+    root = tmp_path / "backups"
+    prefix = env.values["BACKUP_PREFIX"]
+    past_window = aged_dump(root, 20, f"{prefix}-20260901-000000.sql.gz.enc")
+    inside = aged_dump(root, 5, f"{prefix}-20260916-000000.sql.gz.enc")
+
+    run_backup(tmp_path, env)
+
+    assert not past_window.exists(), "the ordinary retention stopped pruning"
+    assert inside.exists()
+
+
+def test_retention_only_touches_this_products_dumps(tmp_path: Path, env: ProductSettings) -> None:
+    """The prunes match BACKUP_PREFIX, so another file in the directory is not theirs to delete."""
+    other = aged_dump(tmp_path / "backups", 60, "otherprefix-20260722-000000.sql.gz.enc")
+
+    run_backup(tmp_path, env)
+
+    assert other.exists()
+
+
+def test_a_verified_dump_touches_the_heartbeat(tmp_path: Path, env: ProductSettings) -> None:
+    """The worker's alarm reads this file's age; it must be written only once
+    the dump has passed the size and HMAC checks, so a heartbeat means a
+    restorable backup and not merely an attempt."""
+    beat = tmp_path / "heartbeat" / "last-success"
+    beat.parent.mkdir()
+
+    run_backup(tmp_path, env, BACKUP_HEARTBEAT=str(beat))
+
+    assert beat.exists()
+    assert beat.read_text().strip().endswith("Z"), "an ISO-8601 UTC stamp, readable by a person too"
+
+
+def test_a_failed_dump_leaves_the_heartbeat_untouched(tmp_path: Path, env: ProductSettings) -> None:
+    beat = tmp_path / "heartbeat" / "last-success"
+    beat.parent.mkdir()
+
+    run_backup(tmp_path, env, dump_fails=True, BACKUP_HEARTBEAT=str(beat))
+
+    assert not beat.exists(), "a failed dump must not look like a fresh backup"
+
+
+def test_a_heartbeat_that_cannot_be_written_does_not_fail_the_backup(
+    tmp_path: Path, env: ProductSettings
+) -> None:
+    """The dump is already safe by then; the alarm side is worth a line, not a lost backup."""
+    out, result = run_backup(tmp_path, env)
+
+    assert dumps(out, env), "the dump itself must still land"
+    assert "heartbeat not written" in result.stderr
+
+
+def test_backup_and_restore_derive_the_same_mac(tmp_path: Path) -> None:
+    sample = tmp_path / "sample"
+    sample.write_bytes(b"ciphertext")
+    assert hmac_via(BACKUP, sample, "fakesalt") == hmac_via(RESTORE, sample, "fakesalt")
+    assert len(hmac_via(BACKUP, sample, "fakesalt")) == 64
+
+
+def test_the_salt_keys_the_mac(tmp_path: Path) -> None:
+    """BACKUP_HMAC_SALT is a product setting now; a different salt must be a different key."""
+    sample = tmp_path / "sample"
+    sample.write_bytes(b"ciphertext")
+    assert hmac_via(BACKUP, sample, "fakesalt") != hmac_via(BACKUP, sample, "othersal")
+
+
+def test_openssl_keeps_only_8_bytes_of_the_salt() -> None:
+    """The positive control for test_backup_salt: openssl's -S takes at most
+    8 bytes (16 hex digits) and drops the rest with only a "hex string is too
+    long" warning, so two salts that share their first 8 bytes derive one
+    key. That is why the scripts refuse a BACKUP_HMAC_SALT that is not
+    exactly 8 bytes. Run against openssl itself, the derivation the scripts
+    use, so the control holds wherever the scripts put their check."""
+
+    def key(salt: str) -> str:
+        done = subprocess.run(
+            [
+                "openssl",
+                "enc",
+                "-aes-256-cbc",
+                "-pbkdf2",
+                "-pass",
+                "env:BACKUP_PASSPHRASE",
+                "-S",
+                salt.encode().hex(),
+                "-P",
+            ],
+            env={**os.environ, "BACKUP_PASSPHRASE": PASSPHRASE},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        (line,) = [x for x in done.stdout.splitlines() if x.startswith("key=")]
+        return line
+
+    assert key("salt-at-backup-time") == key("salt-at-restore-time"), "openssl now keys on the whole salt"
+    assert key("fakesalt") != key("othersal")
+
+
+def test_every_script_requires_the_salt_and_derives_its_hex_the_same_way() -> None:
+    """BACKUP_HMAC_SALT is a required product setting with no default: a
+    default in one script and not another would key the sidecars differently
+    on each side. The hex for openssl's -S is derived by one identical
+    expression in all three, or a dump sealed by one is refused by another."""
+    required = "BACKUP_HMAC_SALT:?"
+    derivation = "printf '%s' \"$BACKUP_HMAC_SALT\" | od -An -tx1 | tr -d ' \\n'"
+    for script in (BACKUP, RESTORE, BACKUP.with_name("logarchive.sh")):
+        text = script.read_text(encoding="utf-8")
+        code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+        assert any(line.startswith(': "${' + required) for line in code), (
+            f"{script.name} does not require the salt"
+        )
+        assert not any("BACKUP_HMAC_SALT:-" in line for line in code), f"{script.name} defaults the salt"
+        assert not any(line.startswith("BACKUP_HMAC_SALT=") for line in code), (
+            f"{script.name} assigns the salt"
+        )
+        assert lift(script, "mac_key").count(derivation) == 1, f"{script.name} derives the -S hex differently"
+
+
+def test_backup_writes_a_dump_with_a_matching_sidecar(backup_dir: Path, env: ProductSettings) -> None:
+    found = dumps(backup_dir, env)
+    assert len(found) == 1
+    sidecar = Path(f"{found[0]}.hmac")
+    assert sidecar.read_text().strip() == hmac_via(BACKUP, found[0], env.values["BACKUP_HMAC_SALT"])
+    assert not list(backup_dir.glob("*.part*"))
+
+
+def test_restore_feeds_psql_only_a_verified_whole_dump(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    result, received = restore(tmp_path, env, dumps(backup_dir, env)[0])
+    assert result.returncode == 0, result.stderr
+    assert received.read_text() == FAKE_DUMP
+    argv = Path(f"{received}.argv").read_text()
+    assert "--single-transaction" in argv
+    assert f"-p {env.values['COMPOSE_PROJECT']} exec -T {env.values['DB_SERVICE']} psql" in argv, argv
+    assert not plaintext_left(tmp_path, env), "plaintext temp file must be removed"
+
+
+def test_restore_refuses_a_dump_sealed_under_another_salt(tmp_path: Path, product_settings: Callable) -> None:
+    """A product.settings whose salt differs from the one the dump was sealed under is a refusal, not a restore."""
+    sealed = product_settings(BACKUP_HMAC_SALT="backupsl")
+    out, _ = run_backup(tmp_path, sealed)
+    reading = product_settings(BACKUP_HMAC_SALT="restorsl")
+    result, received = restore(tmp_path, reading, dumps(out, reading)[0])
+    assert result.returncode == 1 and "does not match its .hmac sidecar" in result.stderr
+    assert not received.exists()
+
+
+def test_restore_refuses_a_modified_dump_before_decrypting(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    dump = dumps(backup_dir, env)[0]
+    data = bytearray(dump.read_bytes())
+    data[len(data) // 2] ^= 0x01
+    dump.write_bytes(data)
+    result, received = restore(tmp_path, env, dump)
+    assert result.returncode == 1 and "does not match its .hmac sidecar" in result.stderr
+    assert not received.exists()
+
+
+def test_restore_refuses_a_wrong_passphrase_before_decrypting(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    result, received = restore(tmp_path, env, dumps(backup_dir, env)[0], BACKUP_PASSPHRASE="not it")
+    assert result.returncode == 1 and "wrong passphrase" in result.stderr
+    assert not received.exists()
+
+
+def test_restore_refuses_a_dump_without_a_sidecar_unless_told(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    dump = dumps(backup_dir, env)[0]
+    Path(f"{dump}.hmac").unlink()
+    result, received = restore(tmp_path, env, dump)
+    assert result.returncode == 1 and "RESTORE_UNVERIFIED=1" in result.stderr
+    assert not received.exists()
+    result, received = restore(tmp_path, env, dump, RESTORE_UNVERIFIED="1")
+    assert result.returncode == 0, result.stderr
+    assert received.read_text() == FAKE_DUMP
+
+
+def test_restore_refuses_a_truncated_dump(tmp_path: Path, env: ProductSettings) -> None:
+    truncated = FAKE_DUMP.split("-- PostgreSQL database dump complete")[0]
+    dump = tmp_path / f"{env.values['BACKUP_PREFIX']}-truncated.sql.gz.enc"
+    code = (
+        f"{functions(BACKUP, ('mac_key', 'hmac_of'))}\n"
+        f"printf '%s' \"$FAKE_DUMP\" | gzip | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASSPHRASE -out {dump}\n"
+        f"hmac_of {dump} >{dump}.hmac"
+    )
+    subprocess.run(
+        ["bash", "-c", code],
+        env={
+            **os.environ,
+            "BACKUP_PASSPHRASE": PASSPHRASE,
+            "BACKUP_HMAC_SALT": env.values["BACKUP_HMAC_SALT"],
+            "FAKE_DUMP": truncated,
+        },
+        check=True,
+    )
+    result, received = restore(tmp_path, env, dump)
+    assert result.returncode == 1 and "truncated" in result.stderr
+    assert not received.exists()
+    # The refusal happens AFTER the decrypt, so this is the failure path that
+    # leaves the whole database in cleartext if the EXIT trap stops carrying
+    # it. The success path removes the plaintext explicitly the moment psql
+    # has read it, so the trap is the only thing covering this one.
+    assert not plaintext_left(tmp_path, env), "a refused restore left the decrypted dump on disk"
+
+
+def test_restore_refuses_when_the_mac_key_cannot_be_derived(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """An openssl that prints nothing for the key must not let an empty sidecar through."""
+    dump = dumps(backup_dir, env)[0]
+    Path(f"{dump}.hmac").write_bytes(b"")
+    shim_dir = tmp_path / "shim"
+    fake(
+        shim_dir, "openssl", f'case " $* " in *" -P "*) exit 0 ;; esac\nexec {shutil.which("openssl")} "$@"\n'
+    )
+    result, received = restore(tmp_path, env, dump, path_prefix=str(shim_dir))
+    assert result.returncode == 1 and "could not derive the MAC key" in result.stderr
+    assert not received.exists()
+
+
+R2 = {
+    "BACKUP_R2_ENDPOINT": "https://storage.invalid",
+    "BACKUP_R2_BUCKET": "fake-bucket",
+    "BACKUP_R2_ACCESS_KEY_ID": "AKIDEXAMPLE",
+    "BACKUP_R2_SECRET_ACCESS_KEY": "s3cr3t-example",
+}
+
+
+def test_without_r2_settings_nothing_is_uploaded(tmp_path: Path, env: ProductSettings) -> None:
+    _out, result = run_backup(tmp_path, env)
+    assert "off-site copies off" in result.stdout
+    assert not (tmp_path / "curl-calls").exists()
+
+
+def test_dump_and_sidecar_are_uploaded_with_credentials_by_stdin(
+    tmp_path: Path, env: ProductSettings
+) -> None:
+    out, result = run_backup(tmp_path, env, **R2)
+    dump = dumps(out, env)[0]
+    lines = (tmp_path / "curl-calls").read_text().splitlines()
+    argv = [line for line in lines if line.startswith("argv:")]
+    stdin = [line for line in lines if line.startswith("stdin:")]
+    assert len(argv) == 2 and len(stdin) == 2
+    assert argv[0].endswith(f"{R2['BACKUP_R2_ENDPOINT']}/{R2['BACKUP_R2_BUCKET']}/{dump.name}")
+    assert argv[1].endswith(f"{R2['BACKUP_R2_ENDPOINT']}/{R2['BACKUP_R2_BUCKET']}/{dump.name}.hmac")
+    assert all("--aws-sigv4" in line and "-K -" in line and f"-T {out}/" in line for line in argv)
+    assert all("s3cr3t-example" not in line for line in argv)
+    assert all(line == 'stdin: user = "AKIDEXAMPLE:s3cr3t-example"' for line in stdin)
+    assert result.stdout.count("off-site copy written") == 2
+    assert "off-site copies on" in result.stdout
+
+
+def test_a_failed_upload_is_logged_and_the_local_backup_stands(tmp_path: Path, env: ProductSettings) -> None:
+    fake(tmp_path / "bin", "curl", "cat >/dev/null\nexit 22\n")
+    out, result = run_backup(tmp_path, env, **R2)
+    assert result.stderr.count("off-site copy FAILED") == 2
+    assert len(dumps(out, env)) == 1
+    assert len(dumps(out, env, ".hmac")) == 1
+
+
+@pytest.mark.parametrize(
+    ("broken", "reason"),
+    [
+        ({"BACKUP_R2_SECRET_ACCESS_KEY": ""}, "secret is empty"),
+        ({"BACKUP_R2_ENDPOINT": "http://storage.invalid"}, "https://"),
+        ({"BACKUP_R2_SECRET_ACCESS_KEY": "s3cr3t\nurl = https://evil.invalid/"}, "unexpected characters"),
+    ],
+)
+def test_a_misconfigured_r2_setting_turns_uploads_off_loudly(
+    tmp_path: Path, env: ProductSettings, broken: dict, reason: str
+) -> None:
+    out, result = run_backup(tmp_path, env, **{**R2, **broken})
+    assert "MISCONFIGURED" in result.stderr and reason in result.stderr
+    assert "off-site copies off" in result.stdout
+    assert not (tmp_path / "curl-calls").exists()
+    assert len(dumps(out, env)) == 1
+
+
+def test_uploads_are_pinned_to_https() -> None:
+    assert "--proto '=https'" in BACKUP.read_text(encoding="utf-8")
+
+
+def test_a_restore_says_which_erasures_it_undid(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """A restore brings back data someone asked to have deleted, and takes the
+    record that they asked away with it, so it has to say so.
+
+    The erasure record lives in the same database as the data it records the
+    erasure of, so a dump from before a request restores both the data and a
+    world in which the request never happened. The restore cannot repair
+    that.
+    """
+    result, _ = restore(tmp_path, env, dumps(backup_dir, env)[0])
+    assert result.returncode == 0, result.stderr
+
+    warning = result.stderr
+    assert "undone erasures" in warning, warning
+    # The boundary VALUE, not just the label. Asserting the label passed on the
+    # failure branch too, where the message says the window is unknown - so a
+    # regression that always failed the query read as a working warning.
+    assert FAKE_ERASURE_AT in warning, warning
+    assert "Newest erasure request in the restored data:" in warning, warning
+    # The two things a person can actually do, and the thing they cannot.
+    assert "You CANNOT list them" in warning, warning
+    assert "run the product's purge again" in warning, warning
+    assert "privacy contact address" in warning, warning
+    assert "will NOT work again" in warning, warning
+
+
+def test_the_erasure_boundary_is_the_products_own_query(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """The timestamp has to come from the restored rows, through ERASURE_CHECK_SQL.
+
+    A boundary taken from the dump's FILENAME would be the moment the backup
+    ran, not the newest erasure it contains.
+    """
+    _, received = restore(tmp_path, env, dumps(backup_dir, env)[0])
+    argv = Path(f"{received}.argv").read_text()
+    assert ERASURE_SQL in argv, f"the configured erasure query did not reach the database:\n{argv}"
+
+
+def test_a_product_without_an_erasure_query_gets_no_erasure_step(
+    tmp_path: Path, product_settings: Callable[..., ProductSettings]
+) -> None:
+    """ERASURE_CHECK_SQL empty: the restore applies the dump and ends, with no query and no warning."""
+    plain = product_settings(ERASURE_CHECK_SQL="")
+    out, _ = run_backup(tmp_path, plain)
+    result, received = restore(tmp_path, plain, dumps(out, plain)[0])
+    assert result.returncode == 0, result.stderr
+    assert received.read_text() == FAKE_DUMP
+    assert len(Path(f"{received}.argv").read_text().splitlines()) == 1, "only the psql that applies the dump"
+    assert "undone erasures" not in result.stderr
+    assert not plaintext_left(tmp_path, plain)
+
+
+# docker compose warns about every unset ${...} in the compose file, and the
+# restore loads no env file. So this is on stderr for a perfectly successful
+# query, and the exact text that made "stderr is empty" look like a synonym
+# for "the read worked".
+COMPOSE_NOISE = (
+    'WARN[0000] The "POSTGRES_PASSWORD" variable is not set. Defaulting to a blank string.\n'
+    'level=warning msg="The \\"REDIS_PASSWORD\\" variable is not set."\n'
+)
+
+
+def test_compose_warnings_do_not_turn_a_good_read_into_an_unknown_window(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """Discriminating on whether stderr is empty reads compose's interpolation
+    warnings as a failed query. Exit status is what separates them."""
+    result, _ = restore(tmp_path, env, dumps(backup_dir, env)[0], erasure_err=COMPOSE_NOISE)
+    assert result.returncode == 0, result.stderr
+    assert FAKE_ERASURE_AT in result.stderr, result.stderr
+    assert "window is unknown" not in result.stderr, result.stderr
+
+
+def test_an_empty_table_is_not_reported_as_a_boundary(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """No row survives the restore, so nothing bounds what it undid. That is
+    the widest case, and also what a deployment that never received a request
+    looks like, so the message says it cannot tell them apart."""
+    result, _ = restore(tmp_path, env, dumps(backup_dir, env)[0], erasure_out="", erasure_err=COMPOSE_NOISE)
+    assert result.returncode == 0, result.stderr
+    assert "NO erasure request survives" in result.stderr, result.stderr
+    assert "Newest erasure request" not in result.stderr, result.stderr
+
+
+def test_a_failed_read_quotes_psql_and_not_the_compose_warnings(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """ "The table is not in this dump" and "postgres is not up" want opposite
+    responses, so the reason has to survive - and it arrives AFTER compose's
+    noise, which is why the last unfiltered line is the one taken.
+    """
+    psql_error = 'ERROR:  relation "deletion_requests" does not exist'
+    # A warning on BOTH sides of the error, so `tail -1` alone cannot pass
+    # this: the last line is a warning, and only the filter reaches the error.
+    result, _ = restore(
+        tmp_path,
+        env,
+        dumps(backup_dir, env)[0],
+        erasure_out="",
+        erasure_err=COMPOSE_NOISE + psql_error + "\n" + COMPOSE_NOISE,
+        erasure_code=1,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "window is unknown" in result.stderr, result.stderr
+    assert psql_error in result.stderr, result.stderr
+    assert "POSTGRES_PASSWORD" not in result.stderr, result.stderr
+    assert "NO erasure request survives" not in result.stderr, result.stderr
+
+
+def test_a_rehearsal_is_not_told_the_live_stack_owes_someone_an_erasure(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """An alarm that fires identically on every drill is one the operator
+    learns to dismiss, so the stakes line is the live stack's (the project is
+    COMPOSE_PROJECT), and a rehearsal is told plainly that nothing is owed."""
+    dump = dumps(backup_dir, env)[0]
+    live, _ = restore(tmp_path, env, dump)
+    assert f"restoring into compose project: {env.values['COMPOSE_PROJECT']}" in live.stderr
+    assert "this deployment is holding data that someone asked us to delete" in live.stderr
+
+    rehearsal, _ = restore(tmp_path, env, dump, RESTORE_PROJECT="drill")
+    assert "restoring into compose project: drill" in rehearsal.stderr
+    assert "nothing is owed here" in rehearsal.stderr, rehearsal.stderr
+    assert "holding data that someone asked us to delete" not in rehearsal.stderr
+
+
+def test_the_plaintext_dump_is_gone_before_the_boundary_query(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """The decrypted file is the entire database in cleartext. It is removed
+    as soon as psql has read it; the trap stays for the paths that never get
+    there."""
+    _, received = restore(tmp_path, env, dumps(backup_dir, env)[0])
+    listing = Path(f"{received}.tmpfiles")
+    left = [line for line in listing.read_text().splitlines() if line.strip()]
+    assert all(line.endswith(".err") for line in left), (
+        f"the decrypted dump was still on disk during the boundary query: {left}"
+    )
+
+
+def test_a_restore_that_cannot_print_its_warning_still_succeeds(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """Everything in step 4 happens after the point of no return. vm-autostart
+    calls restore.sh as a bare command with RESTORE_OK still 0, so a non-zero
+    exit fires the cleanup that removes the volume this restore just filled."""
+    result, _ = restore(tmp_path, env, dumps(backup_dir, env)[0], break_notice=True)
+    assert result.returncode == 0, (
+        f"a successful restore exited {result.returncode} because its warning failed"
+    )
+    assert "complete" in result.stdout
+
+
+def test_a_failing_cleanup_does_not_turn_a_good_restore_into_a_failed_one(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """A read-only or full filesystem makes the unlink fail, and both the
+    explicit rm after psql and the EXIT trap are then non-zero commands under
+    `set -eu` - and a failing EXIT trap sets the script's status as well."""
+    result, _ = restore(tmp_path, env, dumps(backup_dir, env)[0], break_cleanup=True)
+    assert result.returncode == 0, (
+        f"exited {result.returncode} because cleanup failed, which costs the database"
+    )
+    assert "undone erasures" in result.stderr, "the warning stopped as well"
+
+
+def test_a_restore_whose_stdout_is_gone_still_succeeds(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """The completion line is the script's only stdout write, and a full disk
+    fails it as readily as it fails the log it is being written to."""
+    result, _ = restore(tmp_path, env, dumps(backup_dir, env)[0], close_stdout=True)
+    assert result.returncode == 0, f"exited {result.returncode} because it could not announce success"
+
+
+def test_a_restore_without_product_settings_refuses_before_anything(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    """restore.sh takes every product setting from PRODUCT_SETTINGS; without it there is nothing to restore into."""
+    run_env = {k: v for k, v in os.environ.items() if k != "PRODUCT_SETTINGS"}
+    result = subprocess.run(
+        ["bash", str(RESTORE), str(dumps(backup_dir, env)[0])],
+        env={**run_env, "BACKUP_PASSPHRASE": PASSPHRASE},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "PRODUCT_SETTINGS" in result.stderr, result.stderr
