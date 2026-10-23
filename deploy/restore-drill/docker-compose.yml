@@ -1,0 +1,39 @@
+# The scratch stack for the restore rehearsal (docs/restore-rehearsal.md).
+#
+# The production image plus the production init script, because the dump's
+# OWNER and GRANT statements name the product's app and backup roles and a
+# bare image refuses the restore on them - the first run of this drill found
+# that. run.sh copies the real init script (POSTGRES_INIT_DIR) into .init/
+# here, fresh each run; baked in rather than bind-mounted, because a Mac path
+# mounted into the VM arrived empty and the entrypoint ignored it. Same user and database
+# name (DB_USER, DB_NAME), because restore.sh execs psql with them. No volume:
+# empty on the way in, gone with `down -v`.
+#
+# run.sh exports POSTGRES_IMAGE, DB_USER and DB_NAME from
+# product.settings before compose reads this file.
+#
+# The init script must read the role passwords from APP_DB_PASSWORD and
+# BACKUP_DB_PASSWORD. A product whose init script reads other names sets
+# these as aliases of its existing variables.
+#
+# Always compose project "drill", never the live COMPOSE_PROJECT: restore.sh
+# names the project it is about to write to, and the live one is the default.
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:?}
+    environment:
+      POSTGRES_USER: ${DB_USER:?}
+      POSTGRES_DB: ${DB_NAME:?}
+      POSTGRES_PASSWORD: drill-only-never-reused
+      APP_DB_PASSWORD: drill-app-never-reused
+      BACKUP_DB_PASSWORD: drill-backup-never-reused
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?} -d ${DB_NAME:?}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

@@ -90,8 +90,6 @@ COLIMA_HOME=/srv/myproduct-vm
 LAUNCH_LABEL=com.example.myproduct.vm-autostart
 # Directory for the autostart's state and logs.
 APP_SUPPORT_DIR=/srv/myproduct-support
-# Public origin the autostart checks once the stack is up.
-ORIGIN_URL=https://app.example.com
 # Query a restore must answer to count as verified.
 RESTORE_VERIFY_SQL="select count(*) from users"
 # Optional query that checks erasure requests were honoured after a restore (empty: skip).

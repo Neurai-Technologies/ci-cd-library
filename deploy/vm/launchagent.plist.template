@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- A template: install-autostart.sh fills in the double-underscore
+     placeholders from product.settings and writes the result to
+     ~/Library/LaunchAgents/LAUNCH_LABEL.plist. -->
+<dict>
+    <key>Label</key>
+    <string>__LAUNCH_LABEL__</string>
+
+    <!-- A LaunchAgent, not a LaunchDaemon: colima needs a logged-in user
+         session, so this runs at login rather than at boot. -->
+    <!-- Runs an INSTALLED COPY, never the file in the working tree. The repo
+         lives on an external volume mounted `noowners`, is mounted writable
+         into the VM by lima, and is inside the write-allowlist of every
+         sandboxed agent here - while ~/Library is not. Pointing a login item
+         at that tree would let anything able to write the repo rewrite the
+         body of a job that runs as the operator at every login, which is a
+         persistence primitive none of those writers otherwise has. Copy the
+         script on install, and again after editing it. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__SCRIPT_PATH__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- No KeepAlive. The script waits up to five minutes for the external
+         volume and then gives up loudly; relaunching it in a loop would just
+         retry a condition only the operator can fix, and a colima start
+         racing itself is worse than a clear failure in the log. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Not /tmp: fixed, predictable names in a world-writable sticky
+         directory can be pre-created by another local account, including as a
+         symlink, and launchd would open them as this user in append mode.
+         launchd expands neither ~ nor $HOME here, so the path is absolute.
+         The script redirects its own output to the .log alongside these; these
+         two only catch failures before that redirect takes effect. -->
+    <key>StandardOutPath</key>
+    <string>__LOG_BASE__.launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_BASE__.launchd.err</string>
+</dict>
+</plist>
