@@ -124,14 +124,43 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    pull request and owner review required, no bypass actors, and
    CODEOWNERS covering the hooks, `product.settings`, the compose file and
    `.github/`; only owners merge. Under promote, `main` gets a ruleset that
-   blocks force-push and deletion and lets only the promote token's actor
-   (fine-grained PAT or GitHub App token) push; a PR rule would block it.
+   blocks force-push and deletion and requires the tests workflow's status
+   check; on the token path it also restricts updates to the promote
+   token's actor (fine-grained PAT or GitHub App token). A PR rule would
+   block either path.
 6. Add the promote caller from the header of
    `.github/workflows/reusable-promote.yml` at the pinned SHA. The tests
    workflow it waits for triggers on `push: branches: [<source-branch>]`
    only, never on tags. Keep `PROMOTE_PUSH_TOKEN` in a GitHub environment
    whose only deployment branch is `main`, name it in the `environment`
    input, and pass `push-token` by name.
+
+   Or push with the caller's own `GITHUB_TOKEN`: set
+   `github-token-push: true`, pass no secret, and grant the calling job
+   exactly `contents: write` and `actions: read`; the `main` ruleset must
+   then let GitHub Actions push it. That lets every workflow run in the
+   repository with `contents: write` update `main`, not only this job, so
+   on this path everyone with write access controls `main`, limited only by
+   the required status check: use it only where the people with write
+   access are exactly the people allowed to push the source branch, and
+   use the token path otherwise. A `GITHUB_TOKEN` push does not trigger the
+   push workflows on `main`, which is why a caller may prefer it: nothing
+   re-runs there, and a deployer that gates on the source-branch runs of
+   the same sha is unaffected. A fast-forward to commits already on the
+   source branch has been seen to succeed with this token when those
+   commits change files under `.github/workflows/`.
+
+   ```yaml
+   jobs:
+     promote:
+       permissions:
+         contents: write
+         actions: read
+       uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-promote.yml@<full SHA> # vX.Y.Z
+       with:
+         tests-workflow: .github/workflows/tests.yml
+         github-token-push: true
+   ```
 7. Install the VM autostart from a Mac terminal, not from a sandboxed
    agent (it writes to `~/Library`):
 
