@@ -71,8 +71,10 @@ packages' metadata on 2026-10-23.
 | actions/checkout | v4.4.0 and v7.0.1, by commit SHA | workflows | MIT (upstream) |
 | actions/setup-python | v5.6.0, by commit SHA | workflows | MIT (upstream) |
 | actions/setup-node | v4.4.0, by commit SHA | reusable workflows | MIT (upstream) |
+| actions/cache | v4.3.0, by commit SHA | reusable-ci (cargo cache) | MIT (upstream) |
 | pnpm/action-setup | v4.3.0, by commit SHA | reusable workflows | MIT (upstream) |
 | Gitleaks | 8.30.1, by SHA-256 | CI, hooks, check suite | MIT (upstream) |
+| Rust toolchain | the caller's exact X.Y.Z, via the runner image's rustup over HTTPS (not checksum-pinned) | reusable-ci (`rust-toolchain`) | MIT or Apache-2.0 (upstream) |
 | postgres image | 16.15-alpine | backup and restore-drill images | PostgreSQL Licence (upstream) |
 | docker image | 27-cli, by digest | deployer image | Apache-2.0 (upstream) |
 

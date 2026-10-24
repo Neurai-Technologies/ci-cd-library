@@ -41,6 +41,46 @@ on:
         type: string
         required: false
         default: ""
+      node-cache:
+        description: Package manager whose cache setup-node restores, e.g. npm. Needs node-version set and that package manager's lockfile in the repository. Empty caches nothing.
+        type: string
+        required: false
+        default: ""
+      rust-toolchain:
+        description: Exact Rust version X.Y.Z installed with rustup, with rustfmt and clippy, and made the default, e.g. "1.85.0"; any other value is refused. Empty skips it.
+        type: string
+        required: false
+        default: ""
+      cargo-dir:
+        description: Folder holding Cargo.lock and target/, e.g. backend. Caches ~/.cargo and its target/ under a key on the toolchain and its Cargo.lock. Empty skips the cache.
+        type: string
+        required: false
+        default: ""
+      postgres-image:
+        description: Postgres service image with a full version tag, e.g. "postgres:16.4-alpine", on localhost:5432. Empty starts no service. The test command gets the service's user, password and database as CI_POSTGRES_USER, CI_POSTGRES_PASSWORD and CI_POSTGRES_DB, so a caller builds its connection URL without writing the password in its workflow.
+        type: string
+        required: false
+        default: ""
+      postgres-user:
+        description: POSTGRES_USER of the Postgres service. A disposable test credential, not a secret.
+        type: string
+        required: false
+        default: test
+      postgres-password:
+        description: POSTGRES_PASSWORD of the Postgres service. A disposable test credential, not a secret.
+        type: string
+        required: false
+        default: test
+      postgres-db:
+        description: POSTGRES_DB of the Postgres service.
+        type: string
+        required: false
+        default: test
+      redis-image:
+        description: Redis service image with a full version tag, e.g. "redis:7.4.1-alpine", on localhost:6379. Empty starts no service.
+        type: string
+        required: false
+        default: ""
       timeout-minutes:
         description: Job timeout.
         type: number
@@ -70,6 +110,38 @@ jobs:
     concurrency:
       group: reusable-ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency-key }}
       cancel-in-progress: true
+    # A service whose image is an empty string is not started (GitHub's
+    # workflow syntax, jobs.<job_id>.services.<service_id>.image), so both
+    # are off unless the caller names an image. The test command reaches
+    # them on localhost once their health checks pass.
+    services:
+      postgres:
+        image: ${{ inputs.postgres-image }}
+        env:
+          POSTGRES_USER: ${{ inputs.postgres-user }}
+          POSTGRES_PASSWORD: ${{ inputs.postgres-password }}
+          POSTGRES_DB: ${{ inputs.postgres-db }}
+        ports:
+          - 5432:5432
+        # No input in options: the runner hands options to docker create
+        # unparsed, so a value there could add docker flags to a container
+        # that starts before the secret scans. Docker runs the health
+        # command with the container's shell, which reads POSTGRES_USER
+        # from the service's own env.
+        options: >-
+          --health-cmd "pg_isready -U $POSTGRES_USER"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: ${{ inputs.redis-image }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout caller repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -171,9 +243,41 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.node-cache }}
+      # The runner's own rustup, with plain commands rather than one more
+      # action.
+      - name: Install the Rust toolchain
+        if: inputs.rust-toolchain != ''
+        shell: bash
+        env:
+          RUST_TOOLCHAIN: ${{ inputs.rust-toolchain }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RUST_TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "rust-toolchain must be an exact Rust version X.Y.Z, e.g. 1.85.0; a channel, a short version or any other value is refused." >&2
+            exit 1
+          fi
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+      # After the secret scans, so restored files are never in what they scan.
+      - name: Cache cargo
+        if: inputs.cargo-dir != ''
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ inputs.cargo-dir }}/target
+          key: cargo-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.cargo-dir)) }}
       - name: Run test command
         if: inputs.test-command != ''
         shell: bash
         env:
           TEST_COMMAND: ${{ inputs.test-command }}
+          # Library-named, never PG*: libpq and every Postgres tool read
+          # those, so exporting them would change what the caller's own
+          # commands connect to.
+          CI_POSTGRES_USER: ${{ inputs.postgres-user }}
+          CI_POSTGRES_PASSWORD: ${{ inputs.postgres-password }}
+          CI_POSTGRES_DB: ${{ inputs.postgres-db }}
         run: bash -euo pipefail -c "$TEST_COMMAND"

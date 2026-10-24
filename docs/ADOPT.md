@@ -45,6 +45,30 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
      the job fails on the missing files.
    - `python-version`, `node-version`: set only when the test command needs
      them (for example `"3.12"`, `"22"`); empty skips the setup step.
+     `node-cache` (for example `npm`) has setup-node restore that package
+     manager's cache; it needs `node-version` set and that package
+     manager's lockfile in the repository; empty caches nothing.
+   - `rust-toolchain`: an exact Rust version `X.Y.Z` (for example
+     `"1.85.0"`) installed with rustup, with rustfmt and clippy, and made
+     the default; any other value is refused; empty skips it.
+     `cargo-dir`: the folder holding `Cargo.lock` and `target/`; it caches
+     `~/.cargo` and that `target/` under a key on the toolchain and that
+     `Cargo.lock`; empty skips the cache. A restored cache is trusted
+     input: leave `cargo-dir` and `node-cache` empty in a repository where
+     any workflow runs untrusted input on the default branch
+     (`pull_request_target`, `issue_comment` and the like), because such a
+     run can write the default branch's cache entries.
+   - `postgres-image`, `redis-image`: service containers on `localhost:5432`
+     and `localhost:6379`, health-checked before the steps run; give a full
+     version tag. Empty (the default) starts none. `postgres-user`,
+     `postgres-password` and `postgres-db` (each `test` by default) set the
+     Postgres service's user, password and database; they are a disposable
+     test credential, never a real one. The test command gets them as
+     `CI_POSTGRES_USER`, `CI_POSTGRES_PASSWORD` and `CI_POSTGRES_DB` (never
+     `PG*`, which every Postgres tool reads); build the connection URL from
+     them inside `test-command`, so the password is never written in the
+     caller's workflow (the secret scan's URI rule flags a password of six
+     or more characters there).
    - `pages-check` (default true) and `pages-allowed` (default false): the
      job fails while GitHub Pages is on. Only the owner sets
      `pages-allowed: true`, for a website that publishes built files only,
