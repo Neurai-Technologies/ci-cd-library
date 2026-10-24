@@ -35,7 +35,7 @@ SECRETS = (
     "deploy/restore-drill/.init/01-roles.sql",  # run.sh's per-run copy of the init scripts
     "tmp/scratch.sh",
     "checks/.venv",
-    "checks/.pytest_cache",
+    "checks/.pytest_cache/v/cache/lastfailed",  # a file inside: the dir does not exist yet in a fresh checkout
 )
 
 NEEDED = (
