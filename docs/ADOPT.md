@@ -63,8 +63,9 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
      version tag. Empty (the default) starts none. `postgres-user`,
      `postgres-password` and `postgres-db` (each `test` by default) set the
      Postgres service's user, password and database; they are a disposable
-     test credential, never a real one. The test command gets them as
-     `CI_POSTGRES_USER`, `CI_POSTGRES_PASSWORD` and `CI_POSTGRES_DB` (never
+     test credential, never a real one. The test command always gets them,
+     whether or not a Postgres service runs, as `CI_POSTGRES_USER`,
+     `CI_POSTGRES_PASSWORD` and `CI_POSTGRES_DB` (never
      `PG*`, which every Postgres tool reads); build the connection URL from
      them inside `test-command`, so the password is never written in the
      caller's workflow (the secret scan's URI rule flags a password of six
