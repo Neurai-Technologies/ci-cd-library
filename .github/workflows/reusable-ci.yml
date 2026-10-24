@@ -1,8 +1,9 @@
 name: reusable-ci
 
 # Baseline checks for a caller repository: secret scan of the files and the
-# full history, documentation check, Pages check, then the caller's own test
-# command. Call it at a release tag's full commit sha:
+# full history (or the history after history-since), documentation check,
+# Pages check, then the caller's own test command. Call it at a release
+# tag's full commit sha:
 #   uses: <owner>/ci-cd-library/.github/workflows/reusable-ci.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
 # A caller without scripts/check_docs.py and scripts/sensitive-paths.sh must
 # set require-repo-scripts: false, or the job fails.
@@ -31,6 +32,11 @@ on:
         type: number
         required: false
         default: 0
+      history-since:
+        description: Full commit SHA. The history scan covers only commits reachable from HEAD and not from this one; the product's own scanner must keep covering the history before it. Needs the full history (fetch-depth 0, the default); a commit missing from the checkout fails the job. Empty (the default) scans the whole history. The current-files scan is never narrowed.
+        type: string
+        required: false
+        default: ""
       python-version:
         description: Python for the test command, e.g. "3.12". Empty skips setup-python.
         type: string
@@ -183,8 +189,41 @@ jobs:
       # a caller's own .gitleaks.toml could weaken the rules it is scanned by.
       - name: Scan current files
         run: gitleaks dir . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
+      # history-since narrows this scan only, to the commits after the named
+      # one; the product's own scanner keeps covering the history before it.
+      # The value is refused unless it is a full SHA that is an ancestor of
+      # HEAD in a full (not shallow) checkout, so a shallow clone or a commit
+      # from another history fails.
       - name: Scan full history
-        run: gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
+        shell: bash
+        env:
+          HISTORY_SINCE: ${{ inputs.history-since }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HISTORY_SINCE" ]; then
+            gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
+            exit 0
+          fi
+          if [[ ! "$HISTORY_SINCE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "history-since must be a full 40-character lowercase commit SHA; a branch, a tag, a short SHA or any other value is refused." >&2
+            exit 1
+          fi
+          # gitleaks itself fails open on a range it cannot resolve (an
+          # unknown sha scans 0 commits and passes), so the two checks below
+          # are the only guard. A shallow checkout is refused even when the
+          # named commit was fetched: merged-in commits below its depth would
+          # be left out silently.
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "history-since needs the full history, and this checkout is shallow: set fetch-depth 0." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$HISTORY_SINCE" HEAD; then
+            echo "history-since $HISTORY_SINCE is not an ancestor of HEAD in this checkout: a commit from another history, or one a shallow clone did not fetch (history-since needs fetch-depth 0)." >&2
+            exit 1
+          fi
+          count=$(git rev-list --count "$HISTORY_SINCE..HEAD")
+          echo "::notice title=History scan narrowed::The history scan starts after commit $HISTORY_SINCE and covers $count commits; the product's own scanner covers the history before it."
+          gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml" --log-opts="$HISTORY_SINCE..HEAD"
       # The caller's own scripts/check_docs.py only: the library's copy checks
       # the tree it sits in (ROOT is its own parent folder), so it cannot check
       # a caller. A missing script fails the job unless require-repo-scripts is

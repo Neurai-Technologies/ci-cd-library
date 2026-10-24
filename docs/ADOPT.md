@@ -74,6 +74,23 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
      `pages-allowed: true`, for a website that publishes built files only,
      with a decision entry.
    - `fetch-depth`: keep 0; the history scan needs every commit.
+   - `history-since`: leave empty (the default), which scans the whole
+     history. Set it only when the repository's history predates its
+     adoption of the library and holds findings it cannot remove without
+     rewriting history, such as test-only false positives in old commits.
+     Name the full SHA of the repository's last commit before it adopted
+     the library CI, so the adoption commit itself is scanned: the history
+     scan then covers only the commits reachable from HEAD and not from
+     that one. Write it as a literal SHA, never an expression such as
+     `github.event.before` or a pull request's base, and never move it
+     forward: changing it is a gate change that gets its own decision
+     record. A value that is not a full lowercase SHA, or not an ancestor
+     of HEAD, or a shallow checkout, fails the job, so it needs
+     `fetch-depth` 0. The current-files scan
+     is never narrowed, and the product's own scanner must keep scanning
+     the full history: it is the only scan of the commits before that
+     point. The narrowed scan also covers only HEAD's own ancestry, not
+     other branches or tags, which the whole-history default does include.
    - `timeout-minutes` (default 15) and `concurrency-key` (only when one
      caller workflow calls this twice).
 3. Run the pin check above, push a branch, and confirm the run passes in
