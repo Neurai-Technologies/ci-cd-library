@@ -1,9 +1,10 @@
 title = "Repository baseline"
 
 # Defaults plus rules for providers the defaults miss (checked against
-# Gitleaks 8.30.1 on 2026-09-29). No allowlist: add one only for a verified
-# false positive, as a path AND a line regex with the reason here. CI fails
-# on any inline allow comment or .gitleaksignore file.
+# Gitleaks 8.30.1 on 2026-09-29). One allowlist, at the bottom, by owner
+# decision (docs/DECISIONS.md, 2026-10-24): CocoaPods podspec checksums, as a
+# path AND a line regex with the reason there. Every other rule stays strict.
+# CI fails on any inline allow comment or .gitleaksignore file.
 
 [extend]
 useDefault = true
@@ -71,3 +72,30 @@ id = "google-oauth-access-token"
 description = "Google OAuth access token (ya29.)"
 regex = '''\b(ya29\.[A-Za-z0-9_-]{20,})'''
 keywords = ["ya29."]
+
+# A CocoaPods Podfile.lock's SPEC CHECKSUMS section is one line per pod: the
+# pod name and the SHA-1 of its podspec. A pod name containing "api" or "key"
+# (React-cxxstableapi, RNKeychain) is enough for the default generic-api-key
+# rule to read the 40-hex digest after it as a key. The exemption is the path
+# AND the exact line shape - two-space indent, pod name, 40 lowercase hex, end
+# of line - not the file: every other line in it, including EXTERNAL SOURCES
+# URLs, is still scanned. The regex anchors the WHOLE target, with no (?m):
+# gitleaks hands a "line" target its leading newline (hence the optional \n at
+# each end), and for a base64- or percent-decoded finding the target is the
+# decoded text, which may hold several lines; with (?m) one checksum-shaped
+# line inside such a blob would exempt any key encoded beside it. A bare \s+
+# instead of the two spaces would let a column-0 line through. targetRules is
+# required as well: Gitleaks 8.30.1's `dir` source skips a whole file whose
+# path matches any GLOBAL allowlist, ignoring condition (sources/common.go
+# shouldSkipPath), so a global entry would leave every line of Podfile.lock
+# unscanned there. Scoped to the one rule that misfires, the AND is honoured
+# in `dir` and `git` alike. [[allowlists]] and targetRules need Gitleaks
+# 8.25.0 or later (README and config/config.go at v8.30.1, the pinned
+# version).
+[[allowlists]]
+description = "CocoaPods lockfile podspec checksums (SPEC CHECKSUMS)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)Podfile\.lock$''']
+regexTarget = "line"
+regexes = ['''^\n? {2}[A-Za-z0-9_.+-]+: [0-9a-f]{40}\n?$''']

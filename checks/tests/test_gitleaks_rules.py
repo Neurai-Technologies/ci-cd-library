@@ -7,13 +7,16 @@ missing scanner fails here rather than skipping.
 
 from __future__ import annotations
 
+import base64
 import json
 import random
 import re
 import shutil
 import string
 import subprocess
+import urllib.parse
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,7 +32,7 @@ def body(length: int, seed: int, alphabet: str = string.ascii_letters + string.d
     return "".join(generator.choice(alphabet) for _ in range(length))
 
 
-def findings(directory: Path) -> set[tuple[str, str]]:
+def scan(directory: Path) -> list[dict[str, Any]]:
     if shutil.which("gitleaks") is None:
         pytest.fail("gitleaks is required for the rule tests; verification never skips the secret scan")
     report = directory.parent / "report.json"
@@ -51,7 +54,11 @@ def findings(directory: Path) -> set[tuple[str, str]]:
         check=False,
         capture_output=True,
     )
-    return {(item["RuleID"], Path(item["File"]).name) for item in json.loads(report.read_text() or "[]")}
+    return json.loads(report.read_text() or "[]")
+
+
+def findings(directory: Path) -> set[tuple[str, str]]:
+    return {(item["RuleID"], Path(item["File"]).name) for item in scan(directory)}
 
 
 def test_the_added_rules_fire_and_an_allow_comment_does_not_silence_them(tmp_path: Path) -> None:
@@ -91,6 +98,58 @@ def test_the_added_rules_fire_and_an_allow_comment_does_not_silence_them(tmp_pat
     }
     assert expected <= found, f"missing: {sorted(expected - found)}"
     assert not any(name == "clean.py" for _, name in found), "a URI built from a variable is not a secret"
+
+
+def test_the_one_allowlist_exempts_only_checksum_lines_in_a_podfile_lock(tmp_path: Path) -> None:
+    """A SPEC CHECKSUMS line (two-space indent, pod name, 40 lowercase hex) is
+    allowed in a file named Podfile.lock; the same line elsewhere, another
+    indent, and any other line in that file are still reported."""
+    files = tmp_path / "files"
+    files.mkdir()
+    hex_digits = "0123456789abcdef"
+    checksums = [
+        f"  RNKeychain: {body(40, 11, hex_digits)}",
+        f"  React-cxxstableapi: {body(40, 12, hex_digits)}",
+    ]
+    key_name = "api" + "_key"
+    lock = [
+        "SPEC CHECKSUMS:",
+        *checksums,
+        f"RNKeychain: {body(40, 13, hex_digits)}",
+        f"    React-cxxstableapi: {body(40, 14, hex_digits)}",
+        f'{key_name} = "{body(32, 15)}"',
+        # The line must end at the 40th hex digit: trailing text means it is
+        # not a podspec checksum.
+        f"  React-cxxstableapi: {body(40, 17, hex_digits)} trailing",
+    ]
+    (files / "Podfile.lock").write_text("\n".join(lock) + "\n")
+    (files / "notes.txt").write_text("\n".join(checksums) + "\n")
+    reported = {(Path(item["File"]).name, item["StartLine"]) for item in scan(files)}
+    assert {("notes.txt", 1), ("notes.txt", 2)} <= reported, "the checksum shape outside Podfile.lock"
+    assert not {("Podfile.lock", 2), ("Podfile.lock", 3)} & reported, "SPEC CHECKSUMS lines are allowed"
+    others = {("Podfile.lock", line) for line in range(4, 8)}
+    assert others <= reported, f"missing: {sorted(others - reported)}"
+
+
+def test_an_encoded_key_beside_a_checksum_line_is_still_reported(tmp_path: Path) -> None:
+    """For a decoded finding the allowlist sees the decoded text, which can
+    hold several lines; one checksum-shaped line in it must not exempt a key
+    encoded with it, base64 or percent-encoded."""
+    files = tmp_path / "files"
+    files.mkdir()
+    checksum = f"  React-cxxstable{'ap'}i: {body(40, 3, '0123456789abcdef')}"
+    token_name = "client_auth" + "_token"
+    blob = f"\n{checksum}\n{token_name}: {body(32, 21)}\n"
+    lock = [
+        "PODS:",
+        f"  blob: {base64.b64encode(blob.encode()).decode()}",
+        f'  :git => "https://x.example/p?q={urllib.parse.quote(blob, safe="")}"',
+        checksum,
+    ]
+    (files / "Podfile.lock").write_text("\n".join(lock) + "\n")
+    reported = {item["StartLine"] for item in scan(files) if Path(item["File"]).name == "Podfile.lock"}
+    assert {2, 3} <= reported, "an encoded key is exempt because a checksum line is decoded with it"
+    assert 4 not in reported, "the plain checksum line stays allowed"
 
 
 def test_every_scan_ignores_inline_allow_comments_and_refuses_an_ignore_file() -> None:
