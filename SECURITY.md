@@ -27,9 +27,13 @@ third-party services we use, social engineering, denial of service.
   the hooks, `just ci` and CI alike, and a `.gitleaksignore` file is refused
   by the protected hooks themselves as well as by `just ci` and CI, so
   neither can silence a finding anywhere in history.
-- Scanner allowlists start empty. Add one only for a verified false positive,
-  narrowly: a path AND a line regex, with the reason in the config. Never
-  exempt the config file itself or the files that define secret patterns.
+- Scanner allowlists hold only verified false positives; `.gitleaks.toml`
+  has one, CocoaPods podspec checksums in `Podfile.lock`, by owner decision
+  (docs/DECISIONS.md). Add another only the same way, narrowly: a path AND a
+  line regex, limited with `targetRules` to the rule
+  that misfires (a global allowlist that names a path makes `gitleaks dir`
+  skip the whole file), with the reason in the config. Never exempt the
+  config file itself or the files that define secret patterns.
 - Test fixtures that look like secrets are split at construction time so
   they do not match a scanner pattern.
 - If a secret leaks, follow [docs/INCIDENT.md](docs/INCIDENT.md): revoke and

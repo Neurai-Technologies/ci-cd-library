@@ -2,7 +2,8 @@ name: reusable-promote
 
 # Fast-forwards the target branch (main) to a source-branch (ci) sha once every
 # Actions run on that sha is green, so pushing to the source branch is the
-# release action. The caller triggers it when its tests workflow completes:
+# release action. The caller triggers it when its tests workflow completes,
+# in one of two shapes. With a push token (the default):
 #
 #   on:
 #     workflow_run:
@@ -32,6 +33,22 @@ name: reusable-promote
 # empty string without an error, so the push job checks for one. A push made
 # with this token, unlike one made with GITHUB_TOKEN, starts the workflows that
 # run on pushes to the target branch.
+#
+# With the caller's built-in GITHUB_TOKEN instead: the same `on:`, then
+#
+#   permissions:
+#     contents: write
+#     actions: read
+#   jobs:
+#     promote:
+#       uses: <owner>/ci-cd-library/.github/workflows/reusable-promote.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#       with:
+#         tests-workflow: .github/workflows/tests.yml
+#         github-token-push: true
+#
+# and no secret. The target branch's ruleset must let GitHub Actions push it.
+# A GITHUB_TOKEN push starts no workflows on the target branch. A called
+# workflow can only lower the permissions its caller grants, never raise them.
 on:
   workflow_call:
     inputs:
@@ -55,19 +72,22 @@ on:
         required: false
         default: .github/workflows/promote.yml
       environment:
-        description: GitHub environment holding push-token; its only deployment branch is the target branch.
+        description: GitHub environment holding push-token; its only deployment branch is the target branch. Unused when github-token-push is set.
         type: string
         required: false
         default: production
+      github-token-push:
+        description: "Push with the built-in GITHUB_TOKEN under the caller's `contents: write` instead of a push token in an environment."
+        type: boolean
+        required: false
+        default: false
     secrets:
       push-token:
-        description: Token allowed to push the target branch, stored in the environment named above.
-        required: true
+        description: Token allowed to push the target branch, stored in the environment named above. Required unless github-token-push is set; not passed when it is.
+        required: false
 
-permissions:
-  contents: read
-  actions: read
-
+# Set per job, not here: workflow-level permissions would cap the
+# GITHUB_TOKEN push job below at read.
 jobs:
   gate:
     name: require every run on this sha green
@@ -83,6 +103,9 @@ jobs:
       && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     # Serialised per sha, never cancelled: two near-simultaneous completions
     # cannot race the push (the second is a no-op fast-forward anyway).
     concurrency:
@@ -153,9 +176,12 @@ jobs:
   promote:
     name: fast-forward the target branch
     needs: gate
-    if: needs.gate.outputs.go == 'yes'
+    if: needs.gate.outputs.go == 'yes' && !inputs.github-token-push
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     # Only this job names the environment, so the push token reaches nothing
     # but the checkout and the push below.
     environment: ${{ inputs.environment }}
@@ -181,6 +207,48 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           token: ${{ secrets.push-token }}
+      # Plain push, never --force: git refuses a non-fast-forward, so a
+      # diverged target branch fails loudly here instead of losing commits.
+      - name: Fast-forward the target branch
+        shell: bash
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TARGET_BRANCH: ${{ inputs.target-branch }}
+        run: git push origin "$SHA:refs/heads/$TARGET_BRANCH"
+
+  # The same push with the caller's GITHUB_TOKEN, for a caller that sets
+  # github-token-push. A separate job, not an empty environment name, because
+  # GitHub documents no meaning for one. No permissions block: the job keeps
+  # what the caller grants, which must include contents: write.
+  promote-github-token:
+    name: fast-forward the target branch with GITHUB_TOKEN
+    needs: gate
+    if: needs.gate.outputs.go == 'yes' && inputs.github-token-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: reusable-promote-push-${{ github.repository }}-${{ inputs.target-branch }}
+      cancel-in-progress: false
+    steps:
+      # Without an environment, a passed token could only be a repository or
+      # organisation secret, which any branch's workflow can read.
+      - name: Refuse a push token without an environment
+        shell: bash
+        env:
+          PUSH_TOKEN: ${{ secrets.push-token }}
+        run: |
+          if [ -n "$PUSH_TOKEN" ]; then
+            echo "push-token is set with github-token-push: keep the token in an environment and leave github-token-push unset, or pass no token to push with GITHUB_TOKEN."
+            exit 1
+          fi
+      # v7 refuses fork-PR code in workflow_run contexts, backstopping the
+      # gate job's event guard. Its default token is GITHUB_TOKEN, and it
+      # persists in the checkout for the push step.
+      - name: Checkout the gated sha
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
       # Plain push, never --force: git refuses a non-fast-forward, so a
       # diverged target branch fails loudly here instead of losing commits.
       - name: Fast-forward the target branch

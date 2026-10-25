@@ -45,11 +45,53 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
      the job fails on the missing files.
    - `python-version`, `node-version`: set only when the test command needs
      them (for example `"3.12"`, `"22"`); empty skips the setup step.
+     `node-cache` (for example `npm`) has setup-node restore that package
+     manager's cache; it needs `node-version` set and that package
+     manager's lockfile in the repository; empty caches nothing.
+   - `rust-toolchain`: an exact Rust version `X.Y.Z` (for example
+     `"1.85.0"`) installed with rustup, with rustfmt and clippy, and made
+     the default; any other value is refused; empty skips it.
+     `cargo-dir`: the folder holding `Cargo.lock` and `target/`; it caches
+     `~/.cargo` and that `target/` under a key on the toolchain and that
+     `Cargo.lock`; empty skips the cache. A restored cache is trusted
+     input: leave `cargo-dir` and `node-cache` empty in a repository where
+     any workflow runs untrusted input on the default branch
+     (`pull_request_target`, `issue_comment` and the like), because such a
+     run can write the default branch's cache entries.
+   - `postgres-image`, `redis-image`: service containers on `localhost:5432`
+     and `localhost:6379`, health-checked before the steps run; give a full
+     version tag. Empty (the default) starts none. `postgres-user`,
+     `postgres-password` and `postgres-db` (each `test` by default) set the
+     Postgres service's user, password and database; they are a disposable
+     test credential, never a real one. The test command always gets them,
+     whether or not a Postgres service runs, as `CI_POSTGRES_USER`,
+     `CI_POSTGRES_PASSWORD` and `CI_POSTGRES_DB` (never
+     `PG*`, which every Postgres tool reads); build the connection URL from
+     them inside `test-command`, so the password is never written in the
+     caller's workflow (the secret scan's URI rule flags a password of six
+     or more characters there).
    - `pages-check` (default true) and `pages-allowed` (default false): the
      job fails while GitHub Pages is on. Only the owner sets
      `pages-allowed: true`, for a website that publishes built files only,
      with a decision entry.
    - `fetch-depth`: keep 0; the history scan needs every commit.
+   - `history-since`: leave empty (the default), which scans the whole
+     history. Set it only when the repository's history predates its
+     adoption of the library and holds findings it cannot remove without
+     rewriting history, such as test-only false positives in old commits.
+     Name the full SHA of the repository's last commit before it adopted
+     the library CI, so the adoption commit itself is scanned: the history
+     scan then covers only the commits reachable from HEAD and not from
+     that one. Write it as a literal SHA, never an expression such as
+     `github.event.before` or a pull request's base, and never move it
+     forward: changing it is a gate change that gets its own decision
+     record. A value that is not a full lowercase SHA, or not an ancestor
+     of HEAD, or a shallow checkout, fails the job, so it needs
+     `fetch-depth` 0. The current-files scan
+     is never narrowed, and the product's own scanner must keep scanning
+     the full history: it is the only scan of the commits before that
+     point. The narrowed scan also covers only HEAD's own ancestry, not
+     other branches or tags, which the whole-history default does include.
    - `timeout-minutes` (default 15) and `concurrency-key` (only when one
      caller workflow calls this twice).
 3. Run the pin check above, push a branch, and confirm the run passes in
@@ -124,14 +166,43 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    pull request and owner review required, no bypass actors, and
    CODEOWNERS covering the hooks, `product.settings`, the compose file and
    `.github/`; only owners merge. Under promote, `main` gets a ruleset that
-   blocks force-push and deletion and lets only the promote token's actor
-   (fine-grained PAT or GitHub App token) push; a PR rule would block it.
+   blocks force-push and deletion and requires the tests workflow's status
+   check; on the token path it also restricts updates to the promote
+   token's actor (fine-grained PAT or GitHub App token). A PR rule would
+   block either path.
 6. Add the promote caller from the header of
    `.github/workflows/reusable-promote.yml` at the pinned SHA. The tests
    workflow it waits for triggers on `push: branches: [<source-branch>]`
    only, never on tags. Keep `PROMOTE_PUSH_TOKEN` in a GitHub environment
    whose only deployment branch is `main`, name it in the `environment`
    input, and pass `push-token` by name.
+
+   Or push with the caller's own `GITHUB_TOKEN`: set
+   `github-token-push: true`, pass no secret, and grant the calling job
+   exactly `contents: write` and `actions: read`; the `main` ruleset must
+   then let GitHub Actions push it. That lets every workflow run in the
+   repository with `contents: write` update `main`, not only this job, so
+   on this path everyone with write access controls `main`, limited only by
+   the required status check: use it only where the people with write
+   access are exactly the people allowed to push the source branch, and
+   use the token path otherwise. A `GITHUB_TOKEN` push does not trigger the
+   push workflows on `main`, which is why a caller may prefer it: nothing
+   re-runs there, and a deployer that gates on the source-branch runs of
+   the same sha is unaffected. A fast-forward to commits already on the
+   source branch has been seen to succeed with this token when those
+   commits change files under `.github/workflows/`.
+
+   ```yaml
+   jobs:
+     promote:
+       permissions:
+         contents: write
+         actions: read
+       uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-promote.yml@<full SHA> # vX.Y.Z
+       with:
+         tests-workflow: .github/workflows/tests.yml
+         github-token-push: true
+   ```
 7. Install the VM autostart from a Mac terminal, not from a sandboxed
    agent (it writes to `~/Library`):
 
