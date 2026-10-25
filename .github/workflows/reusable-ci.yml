@@ -33,7 +33,7 @@ on:
         required: false
         default: 0
       history-since:
-        description: Full commit SHA. The history scan covers only commits reachable from HEAD and not from this one; the product's own scanner must keep covering the history before it. Needs the full history (fetch-depth 0, the default); a commit missing from the checkout fails the job. Empty (the default) scans the whole history. The current-files scan is never narrowed.
+        description: Full commit SHA. The history scan covers the commits of every branch and tag except this one and its ancestors; the product's own scanner must keep covering the history before it. Needs the full history (fetch-depth 0, the default); a commit missing from the checkout fails the job. Empty (the default) scans the whole history. The current-files scan is never narrowed.
         type: string
         required: false
         default: ""
@@ -212,8 +212,12 @@ jobs:
       # a caller's own .gitleaks.toml could weaken the rules it is scanned by.
       - name: Scan current files
         run: gitleaks dir . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
-      # history-since narrows this scan only, to the commits after the named
-      # one; the product's own scanner keeps covering the history before it.
+      # history-since narrows this scan only, to the commits of every branch
+      # and tag except the named one and its ancestors; the product's own
+      # scanner keeps covering the history before it. --log-opts replaces
+      # gitleaks's own `--full-history --all --diff-filter=tuxdb`, so the
+      # step passes them again; gitleaks splits the value on spaces and runs
+      # git with no shell, so `^<sha>` reaches git as written.
       # The value is refused unless it is a full SHA that is an ancestor of
       # HEAD in a full (not shallow) checkout, so a shallow clone or a commit
       # from another history fails.
@@ -231,11 +235,11 @@ jobs:
             echo "history-since must be a full 40-character lowercase commit SHA; a branch, a tag, a short SHA or any other value is refused." >&2
             exit 1
           fi
-          # gitleaks itself fails open on a range it cannot resolve (an
-          # unknown sha scans 0 commits and passes), so the two checks below
-          # are the only guard. A shallow checkout is refused even when the
-          # named commit was fetched: merged-in commits below its depth would
-          # be left out silently.
+          # gitleaks itself can fail open on a start it cannot resolve (an
+          # unknown sha in a range scanned 0 commits and passed), so the two
+          # checks below are the only guard. A shallow checkout is refused
+          # even when the named commit was fetched: merged-in commits below
+          # its depth would be left out silently.
           if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
             echo "history-since needs the full history, and this checkout is shallow: set fetch-depth 0." >&2
             exit 1
@@ -244,9 +248,9 @@ jobs:
             echo "history-since $HISTORY_SINCE is not an ancestor of HEAD in this checkout: a commit from another history, or one a shallow clone did not fetch (history-since needs fetch-depth 0)." >&2
             exit 1
           fi
-          count=$(git rev-list --count "$HISTORY_SINCE..HEAD")
-          echo "::notice title=History scan narrowed::The history scan starts after commit $HISTORY_SINCE and covers $count commits; the product's own scanner covers the history before it."
-          gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml" --log-opts="$HISTORY_SINCE..HEAD"
+          count=$(git rev-list --count --all "^$HISTORY_SINCE")
+          echo "::notice title=History scan narrowed::The history scan leaves out commit $HISTORY_SINCE and its ancestors and covers $count commits from every branch and tag; the product's own scanner covers the history it leaves out."
+          gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml" --log-opts="--full-history --all --diff-filter=tuxdb ^$HISTORY_SINCE"
       # The caller's own scripts/check_docs.py only: the library's copy checks
       # the tree it sits in (ROOT is its own parent folder), so it cannot check
       # a caller. A missing script fails the job unless require-repo-scripts is
