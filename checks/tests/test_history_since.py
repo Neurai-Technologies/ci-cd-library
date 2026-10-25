@@ -1,13 +1,15 @@
 """reusable-ci's history-since input: empty keeps the whole-history scan exactly
 as it was, a full SHA that is an ancestor of HEAD narrows the history scan to
-the commits after it, and anything else fails before Gitleaks runs.
+the commits of every branch and tag except that one and its ancestors, and
+anything else fails before Gitleaks runs.
 
 The step's own script runs under a fake git and a fake gitleaks that log
-their arguments, since the sandbox cannot create a repository.
+their arguments; one test runs it with the real git in a throwaway repository.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -16,11 +18,14 @@ import pytest
 import yaml
 
 from conftest import LIBRARY_ROOT
-from tests.shell import fake, path_with
+from tests.shell import fake, git_env, path_with
 
 CI = LIBRARY_ROOT / ".github" / "workflows" / "reusable-ci.yml"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 COUNT = "7"
+# gitleaks v8.30.1 replaces its own `--full-history --all --diff-filter=tuxdb`
+# with whatever --log-opts holds, so the narrowed scan passes them again.
+LOG_OPTS = f"--full-history --all --diff-filter=tuxdb ^{SHA}"
 
 
 def load() -> dict[str, Any]:
@@ -107,22 +112,72 @@ def test_empty_history_since_scans_the_whole_history_as_before(tmp_path: Path) -
     assert not git_log.exists()
 
 
-def test_an_ancestor_sha_narrows_the_scan_to_the_commits_after_it(tmp_path: Path) -> None:
+def test_an_ancestor_sha_narrows_the_scan_to_every_ref_after_it(tmp_path: Path) -> None:
     returncode, git_log, gitleaks_log, output = run_history_scan(tmp_path, SHA)
     assert returncode == 0
     assert gitleaks_log.read_text(encoding="utf-8").splitlines() == [
         *base_args(tmp_path / "runner"),
-        f"--log-opts={SHA}..HEAD",
+        f"--log-opts={LOG_OPTS}",
     ]
     assert git_log.read_text(encoding="utf-8").splitlines() == [
         "rev-parse --is-shallow-repository",
         f"merge-base --is-ancestor {SHA} HEAD",
-        f"rev-list --count {SHA}..HEAD",
+        f"rev-list --count --all ^{SHA}",
     ]
     assert (
-        f"::notice title=History scan narrowed::The history scan starts after commit {SHA} and covers {COUNT} commits"
-        in output
+        f"::notice title=History scan narrowed::The history scan leaves out commit {SHA} and its ancestors"
+        f" and covers {COUNT} commits from every branch and tag" in output
     )
+
+
+def test_the_narrowed_scan_includes_a_commit_only_on_another_branch(tmp_path: Path) -> None:
+    """The real git: the start commit, one commit after it on main, one only on a side branch."""
+    repo = tmp_path / "repo"
+    env = git_env()
+
+    def git(*args: str) -> str:
+        done = subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env
+        )
+        return done.stdout.strip()
+
+    def commit(name: str) -> str:
+        (repo / name).write_text(name)
+        git("add", name)
+        git("commit", "-q", "-m", name)
+        return git("rev-parse", "HEAD")
+
+    repo.mkdir()
+    git("init", "-q", "-b", "main")
+    since = commit("start")
+    git("checkout", "-q", "-b", "side")
+    side = commit("side")
+    git("checkout", "-q", "main")
+    after = commit("after")
+
+    bin_dir = tmp_path / "bin"
+    gitleaks_log = tmp_path / "gitleaks.log"
+    fake(bin_dir, "gitleaks", f'printf "%s\\n" "$@" > "{gitleaks_log}"\n')
+    result = subprocess.run(
+        ["bash", "-c", step("Scan full history")["run"]],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HISTORY_SINCE": since,
+            "RUNNER_TEMP": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "covers 2 commits" in result.stdout
+    log_opts = gitleaks_log.read_text(encoding="utf-8").splitlines()[-1].removeprefix("--log-opts=")
+    # gitleaks splits --log-opts on single spaces and runs `git log -p -U0` with them, no shell.
+    listed = git("log", "-p", "-U0", *log_opts.split(" ")).splitlines()
+    commits = {line.split()[1] for line in listed if line.startswith("commit ")}
+    assert commits == {after, side}
 
 
 @pytest.mark.parametrize(

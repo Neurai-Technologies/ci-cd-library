@@ -122,6 +122,29 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: ci-cd-library
           persist-credentials: false
+      # actions/checkout falls back to the caller's own repository and commit
+      # when repository or ref is empty, and GitHub documents these job
+      # contexts on github.com only. Nothing reads the checkout until it is
+      # the called repository (checkout records it as origin,
+      # $GITHUB_SERVER_URL/<owner>/<name>) at the called sha.
+      - name: Verify the library checkout
+        shell: bash
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty, so the library checkout may hold the caller's own repository and commit; refusing to use it."
+            exit 1
+          fi
+          head=$(git -C ci-cd-library rev-parse HEAD || true)
+          origin=$(git -C ci-cd-library config --get remote.origin.url || true)
+          expected="$GITHUB_SERVER_URL/$WORKFLOW_REPOSITORY"
+          if [ "$head" != "$WORKFLOW_SHA" ] || [ "$origin" != "$expected" ]; then
+            echo "::error::The library checkout is '$origin' at '$head', not '$expected' at '$WORKFLOW_SHA'; refusing to use it."
+            exit 1
+          fi
       # ci-gate.sh reads ci-policy.json from its own folder, so the policy
       # built from the inputs goes beside a copy of the gate.
       - name: Write the release policy

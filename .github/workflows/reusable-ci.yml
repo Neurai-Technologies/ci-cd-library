@@ -33,7 +33,7 @@ on:
         required: false
         default: 0
       history-since:
-        description: Full commit SHA. The history scan covers only commits reachable from HEAD and not from this one; the product's own scanner must keep covering the history before it. Needs the full history (fetch-depth 0, the default); a commit missing from the checkout fails the job. Empty (the default) scans the whole history. The current-files scan is never narrowed.
+        description: Full commit SHA. The history scan covers the commits of every branch and tag except this one and its ancestors; the product's own scanner must keep covering the history before it. Needs the full history (fetch-depth 0, the default); a commit missing from the checkout fails the job. Empty (the default) scans the whole history. The current-files scan is never narrowed.
         type: string
         required: false
         default: ""
@@ -154,6 +154,19 @@ jobs:
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
           persist-credentials: false
+      # The library is checked out to .ci-cd-library inside this checkout.
+      # actions/checkout removes a file at that path, and empties a folder
+      # there that does not already hold the library, before checking the
+      # library out in its place: a folder, file or symlink the caller commits
+      # there would be gone before the current-files scan reads the workspace.
+      - name: Refuse a caller .ci-cd-library
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e .ci-cd-library ] || [ -L .ci-cd-library ]; then
+            echo "::error::The repository has .ci-cd-library at its root, where this job checks out the library; the checkout would replace it before the secret scan. Rename or remove it."
+            exit 1
+          fi
       # The library at the exact commit the caller's pinned sha names:
       # job.workflow_repository and job.workflow_sha name the reusable workflow
       # file that defines this job, not the caller's workflow.
@@ -164,6 +177,29 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .ci-cd-library
           persist-credentials: false
+      # actions/checkout falls back to the caller's own repository and commit
+      # when repository or ref is empty, and GitHub documents these job
+      # contexts on github.com only. Nothing reads the checkout until it is
+      # the called repository (checkout records it as origin,
+      # $GITHUB_SERVER_URL/<owner>/<name>) at the called sha.
+      - name: Verify the library checkout
+        shell: bash
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty, so the library checkout may hold the caller's own repository and commit; refusing to use it."
+            exit 1
+          fi
+          head=$(git -C .ci-cd-library rev-parse HEAD || true)
+          origin=$(git -C .ci-cd-library config --get remote.origin.url || true)
+          expected="$GITHUB_SERVER_URL/$WORKFLOW_REPOSITORY"
+          if [ "$head" != "$WORKFLOW_SHA" ] || [ "$origin" != "$expected" ]; then
+            echo "::error::The library checkout is '$origin' at '$head', not '$expected' at '$WORKFLOW_SHA'; refusing to use it."
+            exit 1
+          fi
       # Copied out and removed so the caller's tree stays clean: the secret
       # scan, git status and the test command see only the caller's files.
       - name: Stage library files outside the workspace
@@ -189,8 +225,12 @@ jobs:
       # a caller's own .gitleaks.toml could weaken the rules it is scanned by.
       - name: Scan current files
         run: gitleaks dir . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml"
-      # history-since narrows this scan only, to the commits after the named
-      # one; the product's own scanner keeps covering the history before it.
+      # history-since narrows this scan only, to the commits of every branch
+      # and tag except the named one and its ancestors; the product's own
+      # scanner keeps covering the history before it. --log-opts replaces
+      # gitleaks's own `--full-history --all --diff-filter=tuxdb`, so the
+      # step passes them again; gitleaks splits the value on spaces and runs
+      # git with no shell, so `^<sha>` reaches git as written.
       # The value is refused unless it is a full SHA that is an ancestor of
       # HEAD in a full (not shallow) checkout, so a shallow clone or a commit
       # from another history fails.
@@ -208,11 +248,11 @@ jobs:
             echo "history-since must be a full 40-character lowercase commit SHA; a branch, a tag, a short SHA or any other value is refused." >&2
             exit 1
           fi
-          # gitleaks itself fails open on a range it cannot resolve (an
-          # unknown sha scans 0 commits and passes), so the two checks below
-          # are the only guard. A shallow checkout is refused even when the
-          # named commit was fetched: merged-in commits below its depth would
-          # be left out silently.
+          # gitleaks itself can fail open on a start it cannot resolve (an
+          # unknown sha in a range scanned 0 commits and passed), so the two
+          # checks below are the only guard. A shallow checkout is refused
+          # even when the named commit was fetched: merged-in commits below
+          # its depth would be left out silently.
           if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
             echo "history-since needs the full history, and this checkout is shallow: set fetch-depth 0." >&2
             exit 1
@@ -221,9 +261,9 @@ jobs:
             echo "history-since $HISTORY_SINCE is not an ancestor of HEAD in this checkout: a commit from another history, or one a shallow clone did not fetch (history-since needs fetch-depth 0)." >&2
             exit 1
           fi
-          count=$(git rev-list --count "$HISTORY_SINCE..HEAD")
-          echo "::notice title=History scan narrowed::The history scan starts after commit $HISTORY_SINCE and covers $count commits; the product's own scanner covers the history before it."
-          gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml" --log-opts="$HISTORY_SINCE..HEAD"
+          count=$(git rev-list --count --all "^$HISTORY_SINCE")
+          echo "::notice title=History scan narrowed::The history scan leaves out commit $HISTORY_SINCE and its ancestors and covers $count commits from every branch and tag; the product's own scanner covers the history it leaves out."
+          gitleaks git . --redact --no-banner --ignore-gitleaks-allow --config "$RUNNER_TEMP/ci-cd-library/gitleaks.toml" --log-opts="--full-history --all --diff-filter=tuxdb ^$HISTORY_SINCE"
       # The caller's own scripts/check_docs.py only: the library's copy checks
       # the tree it sits in (ROOT is its own parent folder), so it cannot check
       # a caller. A missing script fails the job unless require-repo-scripts is
