@@ -154,6 +154,19 @@ jobs:
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
           persist-credentials: false
+      # The library is checked out to .ci-cd-library inside this checkout.
+      # actions/checkout removes a file at that path, and empties a folder
+      # there that does not already hold the library, before checking the
+      # library out in its place: a folder, file or symlink the caller commits
+      # there would be gone before the current-files scan reads the workspace.
+      - name: Refuse a caller .ci-cd-library
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e .ci-cd-library ] || [ -L .ci-cd-library ]; then
+            echo "::error::The repository has .ci-cd-library at its root, where this job checks out the library; the checkout would replace it before the secret scan. Rename or remove it."
+            exit 1
+          fi
       # The library at the exact commit the caller's pinned sha names:
       # job.workflow_repository and job.workflow_sha name the reusable workflow
       # file that defines this job, not the caller's workflow.

@@ -25,6 +25,8 @@ from tests.shell import fake, path_with
 WORKFLOWS = LIBRARY_ROOT / ".github" / "workflows"
 CHECKOUT = "Checkout ci-cd-library at the called ref"
 VERIFY = "Verify the library checkout"
+# Names the folder only to refuse a caller path there, before the checkout.
+REFUSE = "Refuse a caller .ci-cd-library"
 # Workflow file, job, and the folder the library is checked out to.
 CALLED = [
     ("reusable-ci.yml", "checks", ".ci-cd-library"),
@@ -76,7 +78,7 @@ def test_the_check_runs_right_after_the_checkout_and_before_any_reader(
     readers = [
         i
         for i, s in enumerate(steps(workflow, job))
-        if s.get("name") != VERIFY and folder in s.get("run", "")
+        if s.get("name") not in (VERIFY, REFUSE) and folder in s.get("run", "")
     ]
     assert readers, f"no step reads {folder}; update this test"
     assert min(readers) > names.index(VERIFY)
