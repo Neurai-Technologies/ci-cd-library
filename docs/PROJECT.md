@@ -1,6 +1,6 @@
 # Project brief
 
-- Name and purpose: `ci-cd-library`, the shared, versioned CI/CD and ops
+- Name and purpose: `production-pipeline`, the shared, versioned CI/CD and ops
   library for Neurai Technologies Private Limited products.
 - Users: the product repositories, which call its workflows or pull it by
   git subtree, pinning a release by its full commit SHA (see the
@@ -21,7 +21,7 @@
   repository.
 - Open, once the repository is on GitHub:
   - apply both rulesets once:
-    `gh api -X POST repos/Neurai-Technologies/ci-cd-library/rulesets --input .github/rulesets/main.json`
+    `gh api -X POST repos/Neurai-Technologies/production-pipeline/rulesets --input .github/rulesets/main.json`
     and the same with `.github/rulesets/tags.json`;
   - Actions settings: "Require approval for all outside collaborators",
     and default workflow permissions read-only;

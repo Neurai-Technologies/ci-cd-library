@@ -96,7 +96,7 @@ def numeric_example_keys() -> dict[str, str]:
 
 @pytest.fixture
 def library_root() -> Path:
-    """The root of the ci-cd-library checkout these checks belong to."""
+    """The root of the production-pipeline checkout these checks belong to."""
     return LIBRARY_ROOT
 
 

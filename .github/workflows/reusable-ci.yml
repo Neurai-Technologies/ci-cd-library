@@ -4,7 +4,7 @@ name: reusable-ci
 # full history (or the history after history-since), documentation check,
 # Pages check, then the caller's own test command. Call it at a release
 # tag's full commit sha:
-#   uses: <owner>/ci-cd-library/.github/workflows/reusable-ci.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#   uses: <owner>/production-pipeline/.github/workflows/reusable-ci.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
 # A caller without scripts/check_docs.py and scripts/sensitive-paths.sh must
 # set require-repo-scripts: false, or the job fails.
 # Actions are pinned to a commit; the trailing comment is the release each sha

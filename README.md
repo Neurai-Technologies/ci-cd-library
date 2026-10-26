@@ -1,4 +1,4 @@
-# ci-cd-library
+# production-pipeline
 
 The shared, versioned CI/CD and ops library for Neurai Technologies Private
 Limited products: reusable GitHub workflows, a VM deploy loop, backup and
@@ -11,7 +11,7 @@ Always by the full commit SHA of a release tag, with the tag in a
 `# vX.Y.Z` comment; never by the tag alone. Nothing changes in a product
 until it bumps the pin.
 
-- Workflows: `uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-ci.yml@<full commit SHA> # vX.Y.Z`
+- Workflows: `uses: Neurai-Technologies/production-pipeline/.github/workflows/reusable-ci.yml@<full commit SHA> # vX.Y.Z`
   (likewise `reusable-promote.yml` and `reusable-worker-deploy.yml`).
 - Deploy, backup and VM scripts: fetch the release tag, check it resolves
   to the pinned SHA (`git rev-parse vX.Y.Z^{commit}`), then
