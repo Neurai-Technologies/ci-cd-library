@@ -14,7 +14,7 @@ name: reusable-promote
 #     actions: read
 #   jobs:
 #     promote:
-#       uses: <owner>/ci-cd-library/.github/workflows/reusable-promote.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#       uses: <owner>/production-pipeline/.github/workflows/reusable-promote.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
 #       with:
 #         tests-workflow: .github/workflows/tests.yml
 #       secrets:
@@ -41,7 +41,7 @@ name: reusable-promote
 #     actions: read
 #   jobs:
 #     promote:
-#       uses: <owner>/ci-cd-library/.github/workflows/reusable-promote.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#       uses: <owner>/production-pipeline/.github/workflows/reusable-promote.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
 #       with:
 #         tests-workflow: .github/workflows/tests.yml
 #         github-token-push: true

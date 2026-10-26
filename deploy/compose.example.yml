@@ -1,4 +1,4 @@
-# The deployer, backup and logarchive services of ci-cd-library. A product
+# The deployer, backup and logarchive services of production-pipeline. A product
 # merges these into its own compose file (services, the x-log-bounds anchor,
 # the backup-heartbeat volume and the logarchive network); its database, API,
 # worker and proxy services stay its own.

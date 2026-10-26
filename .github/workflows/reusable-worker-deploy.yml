@@ -22,7 +22,7 @@ name: reusable-worker-deploy
 #         && github.event.workflow_run.event == 'push'
 #         && github.event.workflow_run.head_branch == 'main'
 #         && github.event.workflow_run.head_repository.full_name == github.repository
-#       uses: <owner>/ci-cd-library/.github/workflows/reusable-worker-deploy.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+#       uses: <owner>/production-pipeline/.github/workflows/reusable-worker-deploy.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
 #       with:
 #         ref: ${{ github.event.workflow_run.head_sha }}
 #       secrets:

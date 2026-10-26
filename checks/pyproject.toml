@@ -1,7 +1,7 @@
 [project]
 name = "ci-cd-library-checks"
 version = "0.1.0"
-description = "ci-cd-library - generic check tests for deploy/, the workflows and the repository tooling"
+description = "production-pipeline - generic check tests for deploy/, the workflows and the repository tooling"
 # Proprietary - see LICENSE at the repo root. No rights granted.
 license = { text = "LicenseRef-Proprietary" }
 classifiers = ["License :: Other/Proprietary License"]

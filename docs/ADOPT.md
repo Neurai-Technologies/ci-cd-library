@@ -1,9 +1,10 @@
-# Adopting ci-cd-library
+# Adopting production-pipeline
 
 How a product repository takes the library into use, by repository type.
 Placeholders: `<full SHA>` is the 40-character commit of a release tag,
-`vX.Y.Z` that tag, `<LIBRARY_DIR>` the folder the subtree lives in (the
-example settings use `ci-cd-library`), `<ORIGIN_URL>` the product's own
+`vX.Y.Z` that tag, `<LIBRARY_DIR>` the folder the subtree lives in (your choice: use the
+same value in `--prefix`, in `LIBRARY_DIR` and in the compose paths; the
+examples use `ci-cd-library`), `<ORIGIN_URL>` the product's own
 GitHub repository.
 
 ## The one check for any pin
@@ -12,7 +13,7 @@ A pin is a full commit SHA with the tag in a comment, never the tag alone.
 Before writing or bumping a pin, resolve the tag and compare:
 
 ```sh
-git ls-remote https://github.com/Neurai-Technologies/ci-cd-library 'refs/tags/vX.Y.Z^{}'
+git ls-remote https://github.com/Neurai-Technologies/production-pipeline 'refs/tags/vX.Y.Z^{}'
 ```
 
 The SHA it prints must equal the SHA you pin. If the line is empty or the
@@ -32,7 +33,7 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
      contents: read
    jobs:
      ci:
-       uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-ci.yml@<full SHA> # vX.Y.Z
+       uses: Neurai-Technologies/production-pipeline/.github/workflows/reusable-ci.yml@<full SHA> # vX.Y.Z
        with:
          test-command: just ci
    ```
@@ -125,7 +126,7 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
 1. Add the library as a subtree, from the product's root:
 
    ```sh
-   git fetch https://github.com/Neurai-Technologies/ci-cd-library tag vX.Y.Z
+   git fetch https://github.com/Neurai-Technologies/production-pipeline tag vX.Y.Z
    git rev-parse 'vX.Y.Z^{commit}'
    git subtree add --prefix <LIBRARY_DIR> --squash <full SHA>
    ```
@@ -198,7 +199,7 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
        permissions:
          contents: write
          actions: read
-       uses: Neurai-Technologies/ci-cd-library/.github/workflows/reusable-promote.yml@<full SHA> # vX.Y.Z
+       uses: Neurai-Technologies/production-pipeline/.github/workflows/reusable-promote.yml@<full SHA> # vX.Y.Z
        with:
          tests-workflow: .github/workflows/tests.yml
          github-token-push: true
@@ -253,7 +254,7 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
 3. For a subtree, fetch the new tag, check the SHA as in c.1, then:
 
    ```sh
-   git subtree pull --prefix <LIBRARY_DIR> --squash https://github.com/Neurai-Technologies/ci-cd-library <full SHA>
+   git subtree pull --prefix <LIBRARY_DIR> --squash https://github.com/Neurai-Technologies/production-pipeline <full SHA>
    ```
 
 4. Compare `deploy/product.settings.example` with your `product.settings`

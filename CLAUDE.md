@@ -224,7 +224,7 @@ from this file, and `just ci` fails when the copies differ.
 
 ## This project
 
-`ci-cd-library` is the shared, versioned CI/CD and ops library for Neurai
+`production-pipeline` is the shared, versioned CI/CD and ops library for Neurai
 Technologies Private Limited products: reusable GitHub workflows, a VM deploy
 loop, backup and log-archive images, restore and restore-drill scripts, the
 macOS LaunchAgent VM autostart script and its installer, and generic check

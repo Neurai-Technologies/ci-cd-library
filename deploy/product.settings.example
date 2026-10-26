@@ -1,4 +1,4 @@
-# Product settings for every ci-cd-library script: the deployer, backup and
+# Product settings for every production-pipeline script: the deployer, backup and
 # logarchive services, and the VM autostart, restore and restore drill.
 # Copy to product.settings next to the product's compose file (env_file resolves
 # against that directory); the services read it with `env_file: product.settings`,
@@ -21,7 +21,7 @@ PRODUCT=myproduct
 COMPOSE_PROJECT=myproduct
 # Directory of the product's compose file, relative (as deploy-loop.sh uses it).
 COMPOSE_DIR=deploy
-# Directory of the ci-cd-library subtree, relative.
+# Directory of the production-pipeline subtree, relative.
 LIBRARY_DIR=ci-cd-library
 # Compose service name of the database.
 DB_SERVICE=db
