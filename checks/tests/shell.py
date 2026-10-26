@@ -58,10 +58,12 @@ def git_env() -> dict[str, str]:
     """An environment for throwaway test repositories that reads no user or system git config.
 
     A global config may sign commits or point hooks elsewhere; neither belongs
-    in a fixture repository.
+    in a fixture repository. Every inherited GIT_* variable is dropped too: a
+    hook exports GIT_DIR, and with it every fixture git command would run
+    against the repository being pushed instead of the fixture.
     """
     return {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_AUTHOR_NAME": "test",

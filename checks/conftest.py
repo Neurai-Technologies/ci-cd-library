@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from collections.abc import Callable
@@ -92,6 +93,17 @@ def numeric_example_keys() -> dict[str, str]:
         if sep and ASSIGNMENT.match(line) and value.isdigit():
             found[key] = value
     return found
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_git_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop every inherited GIT_* variable for each test.
+
+    A git hook exports GIT_DIR; without this, any git a test or a script
+    under test runs would act on the repository the hook runs in.
+    """
+    for name in [key for key in os.environ if key.startswith("GIT_")]:
+        monkeypatch.delenv(name)
 
 
 @pytest.fixture
