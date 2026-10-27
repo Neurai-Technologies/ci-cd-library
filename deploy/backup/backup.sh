@@ -130,11 +130,23 @@ fi
 
 # One cycle at a time on this backup directory: the scheduled service and a
 # pre-deploy `once` share it, and two cycles in the same second would write
-# the same .part. The lock is fd 9 on a file beside the dumps; the kernel
-# drops it when the process dies. busybox flock has no -w, so the wait is
-# bounded here: 60 tries, 5 s apart (59 waits, about 5 minutes), so a
-# pre-deploy `once` still has time to dump inside the deployer's hook limit.
-exec 9>>"${ROOT}/.backup.lock"
+# the same .part. The lock is fd 9 on /lock/backup.lock, the backup-lock
+# named volume: a docker volume inside the VM, where flock works (/backups is
+# a host folder bind-mounted into the VM, where it is unproven), mounted by
+# this service alone, so no other container can hold the lock and stall the
+# cycles. `compose run backup once` mounts the same service volumes, so both
+# runs lock one file. The kernel drops the lock when the process dies.
+# busybox flock has no -w, so the wait is bounded here: 60 tries, 5 s apart
+# (59 waits, about 5 minutes), so a pre-deploy `once` still has time to dump
+# inside the deployer's hook limit.
+# Overridable only so the script can run under a test. Refused, never moved
+# elsewhere: a lock in any other folder is one the other run does not see.
+LOCK_DIR="${BACKUP_LOCK_DIR:-/lock}"
+if [ ! -d "$LOCK_DIR" ] || [ ! -w "$LOCK_DIR" ]; then
+    echo "backup: $LOCK_DIR missing or not writable (the cycle lock lives there); add backup-lock:/lock to the backup service's volumes and declare backup-lock: under the top-level volumes" >&2
+    exit 1
+fi
+exec 9>>"${LOCK_DIR}/backup.lock"
 lock() {
     tries=0
     until flock -n 9; do

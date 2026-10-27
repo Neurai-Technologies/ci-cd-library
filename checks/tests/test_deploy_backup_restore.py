@@ -103,6 +103,9 @@ def run_backup(
         )
     out = tmp_path / "backups"
     out.mkdir(exist_ok=True)
+    # The backup-lock volume compose mounts at /lock.
+    lock_dir = tmp_path / "lock-volume"
+    lock_dir.mkdir(exist_ok=True)
     run_env = {
         **os.environ,
         **env.values,
@@ -110,6 +113,7 @@ def run_backup(
         "BACKUP_PASSPHRASE": PASSPHRASE,
         "BACKUP_ROOT": str(out),
         "BACKUP_HEARTBEAT": str(tmp_path / "no-heartbeat-dir" / "last-success"),
+        "BACKUP_LOCK_DIR": str(lock_dir),
         "FAKE_DUMP": FAKE_DUMP,
         **extra_env,
     }
@@ -334,11 +338,14 @@ def test_once_still_prunes_at_both_windows(tmp_path: Path, env: ProductSettings)
 
 
 def hold_lock(root: Path) -> subprocess.Popen:
-    """Another cycle holding the backup lock, as flock(1) would take it."""
+    """Another cycle holding the backup lock, as flock(1) would take it: in
+    run_backup's lock folder, the volume both runs mount."""
     root.mkdir(exist_ok=True)
+    lock_dir = root.parent / "lock-volume"
+    lock_dir.mkdir(exist_ok=True)
     code = (
         "import fcntl, time\n"
-        f"f = open({str(root / '.backup.lock')!r}, 'a')\n"
+        f"f = open({str(lock_dir / 'backup.lock')!r}, 'a')\n"
         "fcntl.flock(f, fcntl.LOCK_EX)\n"
         "print('held', flush=True)\n"
         "time.sleep(60)\n"
@@ -346,6 +353,34 @@ def hold_lock(root: Path) -> subprocess.Popen:
     holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
     assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
     return holder
+
+
+def test_the_lock_lives_on_its_own_volume_not_beside_the_dumps(tmp_path: Path, env: ProductSettings) -> None:
+    """The dumps sit on a host folder bind-mounted into the VM, where flock is
+    unproven; the lock sits on the backup-lock volume, at /lock by default."""
+    out, _result = run_backup(tmp_path, env, args=("once",))
+
+    assert (tmp_path / "lock-volume" / "backup.lock").is_file()
+    assert [p.name for p in out.iterdir() if "lock" in p.name] == []
+    assert 'LOCK_DIR="${BACKUP_LOCK_DIR:-/lock}"' in BACKUP.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("args", [(), ("once",)])
+def test_a_missing_lock_volume_is_refused_before_any_dump(
+    tmp_path: Path, env: ProductSettings, args: tuple[str, ...]
+) -> None:
+    """Refused, never moved: a lock anywhere else would not be shared."""
+    missing = tmp_path / "no-lock-volume"
+    out, result = run_backup(tmp_path, env, args=args, check=False, BACKUP_LOCK_DIR=str(missing))
+
+    assert result.returncode == 1
+    assert f"backup: {missing} missing or not writable (the cycle lock lives there)" in result.stderr
+    assert (
+        "add backup-lock:/lock to the backup service's volumes and declare backup-lock: under the top-level volumes"
+        in result.stderr
+    )
+    assert not dumps(out, env) and not dumps(out, env, ".hmac")
+    assert "backup written" not in result.stdout
 
 
 def test_once_waits_for_a_cycle_holding_the_lock(tmp_path: Path, env: ProductSettings) -> None:

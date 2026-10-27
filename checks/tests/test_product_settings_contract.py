@@ -54,6 +54,7 @@ NOT_PRODUCT_KEYS = {
     # overridable only so the scripts can run under a test.
     "BACKUP_ROOT": "container mount path, fixed by compose",
     "BACKUP_HEARTBEAT": "container mount path, fixed by compose",
+    "BACKUP_LOCK_DIR": "container mount path, fixed by compose",
     "LOG_ARCHIVE_ROOT": "container mount path, fixed by compose",
     "LOG_ARCHIVE_STAGE": "container tmpfs path, fixed by compose",
     "DOCKER_LOGS": "container mount path, fixed by compose",

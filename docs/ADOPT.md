@@ -149,8 +149,8 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    `SRC_DIR` in `product.settings`, the same path on both sides.
 4. Merge the services of `<LIBRARY_DIR>/deploy/compose.example.yml` into
    the product's compose file: `backup`, `logarchive`, `deployer`, the
-   `x-log-bounds` anchor, the `backup-heartbeat` volume and the
-   `logarchive` network. Keep the `depends_on` name equal to `DB_SERVICE`
+   `x-log-bounds` anchor, the `backup-heartbeat` and `backup-lock`
+   volumes and the `logarchive` network. Keep the `depends_on` name equal to `DB_SERVICE`
    and the `/host-env` mounts equal to `ENV_FILES`. Adjust the relative
    build paths if the compose file is not in `deploy/`. Set the
    `POSTGRES_IMAGE` build arg of `backup` and `logarchive` to the same
@@ -180,7 +180,12 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    `docker compose -p <project> --project-directory <dir> run --rm -T backup once`,
    so the pre-deploy dump gets the same encryption, naming and retention as
    the scheduled ones; it exits non-zero when the dump fails, or when
-   another backup cycle holds the lock for about 5 minutes. The deployer
+   another backup cycle holds the lock for about 5 minutes. The lock is
+   `backup.lock` on the `backup-lock` volume, which the backup service
+   alone mounts (at `/lock`), so the scheduled service and `run ... once`
+   share it and nothing else can hold it. In the product's own compose
+   file, mount `backup-heartbeat` into the worker read-only and never
+   mount `backup-lock` anywhere but the backup service. The deployer
    stops the hook after 900 seconds, so that wait plus one dump must fit
    inside it: check the dump time against the database's size. Stopping
    the hook may not stop the container `run` started, which then keeps
@@ -333,7 +338,11 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    ```
 
 4. Compare `deploy/product.settings.example` with your `product.settings`
-   and add any new key.
+   and add any new key. Compare `deploy/compose.example.yml` with your
+   compose file too. Upgrading to the release that adds the `backup-lock`
+   volume: add `backup-lock:/lock` to the backup service's volumes and
+   declare `backup-lock:` under the top-level `volumes:`, or the scheduled
+   backups and the pre-deploy `once` refuse to start.
 5. Run the product's checks and the library checks, then release the
    product through its normal path. Nothing changes in a product until it
    does this.

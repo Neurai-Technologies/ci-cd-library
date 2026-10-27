@@ -1,7 +1,7 @@
 # The deployer, backup and logarchive services of production-pipeline. A product
 # merges these into its own compose file (services, the x-log-bounds anchor,
-# the backup-heartbeat volume and the logarchive network); its database, API,
-# worker and proxy services stay its own.
+# the backup-heartbeat and backup-lock volumes and the logarchive network);
+# its database, API, worker and proxy services stay its own.
 #
 # The ../ci-cd-library paths below are relative to the product's compose
 # file. They assume LIBRARY_DIR=ci-cd-library sits next to the compose folder
@@ -40,6 +40,9 @@ services:
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
       # Enforced whether or not the dump succeeded; see backup.sh's two prunes.
       BACKUP_MAX_DAYS: ${BACKUP_MAX_DAYS:-55}
+      # Pinned here, over anything product.settings (env_file) might say: the
+      # backup-lock mount below, so the service and `run backup once` share it.
+      BACKUP_LOCK_DIR: /lock
       # Optional off-site copy of every dump and sidecar to an S3 bucket
       # (Cloudflare R2). Unset, dumps stay on this host only.
       BACKUP_R2_ENDPOINT: ${BACKUP_R2_ENDPOINT:-}
@@ -56,6 +59,8 @@ services:
       - ${BACKUP_DIR:-./backups}:/backups
       # See the volume's note at the bottom: written here, read by the worker.
       - backup-heartbeat:/heartbeat
+      # The cycle lock; this service alone mounts it (see the bottom).
+      - backup-lock:/lock
     # The image inherits the database image's VOLUME for its data directory.
     # Nothing here writes there, but without a mount of our own docker made
     # an anonymous volume for it on every recreate and never removed the old
@@ -168,8 +173,15 @@ services:
 volumes:
   # One file: the timestamp backup.sh writes after a verified dump. Written by
   # the backup container, read by the product's worker, so the alarm for
-  # stopped backups needs no access to the dumps themselves.
+  # stopped backups needs no access to the dumps themselves. The worker
+  # mounts it read-only.
   backup-heartbeat:
+  # backup.lock, which serialises the scheduled cycles and a pre-deploy
+  # `run backup once` (both mount the backup service's volumes). Only the
+  # backup service mounts it: any container that could open the file could
+  # hold the lock (flock works on a read-only file too) and stall the cycles.
+  # A docker volume, where flock is known to work.
+  backup-lock:
 
 networks:
   # The log archiver's own network: it needs the internet (R2) and nothing
