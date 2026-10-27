@@ -43,13 +43,16 @@ def test_every_script_parses(script: Path) -> None:
     assert done.returncode == 0, done.stderr
 
 
-def test_the_installer_fills_every_placeholder_of_the_plist_template() -> None:
+def test_the_installer_fills_every_placeholder_of_the_plist_templates() -> None:
     """install-autostart.sh refuses a rendered plist that still holds a
-    placeholder, so a placeholder added to the template without a sed line
+    placeholder, so a placeholder added to a template without a sed line
     would make every install stop; this says so before an install does."""
-    template = (VM / "launchagent.plist.template").read_text(encoding="utf-8")
+    templates = [
+        (VM / name).read_text(encoding="utf-8")
+        for name in ("launchagent.plist.template", "backup-mirror.plist.template")
+    ]
     installer = (VM / "install-autostart.sh").read_text(encoding="utf-8")
-    placeholders = set(re.findall(r"__[A-Z_]+__", template))
+    placeholders = {found for template in templates for found in re.findall(r"__[A-Z_]+__", template)}
     filled = set(re.findall(r'-e "s\|(__[A-Z_]+__)\|', installer))
     assert placeholders, "the template has no placeholders; update this test"
     assert placeholders == filled, {"in template": sorted(placeholders), "filled": sorted(filled)}

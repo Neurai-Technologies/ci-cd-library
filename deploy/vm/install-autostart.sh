@@ -25,6 +25,12 @@
 # agent's own PATH; docker answering on the agent's socket; and the database
 # volume present. The agent then re-checks the VM, the data disk and the
 # volume itself, and with the volume present it only reports and exits 0.
+#
+# With BACKUP_MIRROR_DIR set it also installs backup-mirror.sh and a second
+# agent (backup-mirror.plist.template, label LAUNCH_LABEL.backup-mirror) that
+# copies the dumps to a second disk once a day at BACKUP_MIRROR_TIME. Those
+# two files are checked against main like the others; loading that agent runs
+# nothing until the first BACKUP_MIRROR_TIME.
 set -eu
 
 USAGE="usage: bash install-autostart.sh <ORIGIN_URL> <path to product.settings in this checkout>"
@@ -53,6 +59,8 @@ case "$ENV_ABS" in
 esac
 SRC_REL="$LIBRARY_REL/deploy/vm/vm-autostart.sh"
 TPL_REL="$LIBRARY_REL/deploy/vm/launchagent.plist.template"
+MIRROR_REL="$LIBRARY_REL/deploy/vm/backup-mirror.sh"
+MIRROR_TPL_REL="$LIBRARY_REL/deploy/vm/backup-mirror.plist.template"
 ENV_REL="${ENV_ABS#"$REPO_ROOT"/}"
 
 # The agent's own PATH (vm-autostart.sh sets exactly this), so a tool found
@@ -68,6 +76,13 @@ SCRIPT_REPLACED=0
 ENV_REPLACED=0
 PLIST_REPLACED=0
 LOADED=0
+MIRROR=0
+MIRROR_LABEL=""
+PREV_MIRROR=0
+PREV_MIRROR_PLIST=0
+MIRROR_REPLACED=0
+MIRROR_PLIST_REPLACED=0
+MIRROR_LOADED=0
 
 step() { printf '\n== %s\n' "$1"; }
 stop() { printf 'STOP: %s\n' "$1"; exit 1; }
@@ -79,7 +94,8 @@ on_exit() {
     set +e
     [ -n "$WORK" ] && rm -rf "$WORK"
     [ "$status" -eq 0 ] && return 0
-    if [ "$SCRIPT_REPLACED" -eq 0 ] && [ "$ENV_REPLACED" -eq 0 ] && [ "$PLIST_REPLACED" -eq 0 ]; then
+    if [ "$SCRIPT_REPLACED" -eq 0 ] && [ "$ENV_REPLACED" -eq 0 ] && [ "$PLIST_REPLACED" -eq 0 ] \
+        && [ "$MIRROR_REPLACED" -eq 0 ] && [ "$MIRROR_PLIST_REPLACED" -eq 0 ]; then
         printf 'Nothing was changed.\n'
         return 0
     fi
@@ -88,8 +104,15 @@ on_exit() {
         printf 'The new plist is in LaunchAgents, so launchd will load it at the next login unless you undo this.\n'
     fi
     printf 'Agent loaded by this run: %s\n' "$([ "$LOADED" -eq 1 ] && echo yes || echo no)"
+    if [ "$MIRROR_PLIST_REPLACED" -eq 1 ]; then
+        printf 'The new mirror plist is in LaunchAgents too.\n'
+    fi
+    printf 'Mirror agent loaded by this run: %s\n' "$([ "$MIRROR_LOADED" -eq 1 ] && echo yes || echo no)"
     printf 'To undo, run these in order:\n'
     printf '  launchctl bootout %s\n' "$LABEL"
+    if [ "$MIRROR_REPLACED" -eq 1 ] || [ "$MIRROR_PLIST_REPLACED" -eq 1 ]; then
+        printf '  launchctl bootout %s\n' "$MIRROR_LABEL"
+    fi
     if [ "$SCRIPT_REPLACED" -eq 1 ]; then
         if [ "$PREV_SCRIPT" -eq 1 ]; then
             printf '  cp "%s/vm-autostart.sh" "%s"\n' "$BACKUP_DIR" "$DEST"
@@ -111,7 +134,21 @@ on_exit() {
             printf '  rm "%s"\n' "$PLIST"
         fi
     fi
-    printf '(The bootout line reports an error if the agent was not loaded; that is fine.)\n'
+    if [ "$MIRROR_REPLACED" -eq 1 ]; then
+        if [ "$PREV_MIRROR" -eq 1 ]; then
+            printf '  cp "%s/backup-mirror.sh" "%s"\n' "$BACKUP_DIR" "$MIRROR_DEST"
+        else
+            printf '  rm "%s"\n' "$MIRROR_DEST"
+        fi
+    fi
+    if [ "$MIRROR_PLIST_REPLACED" -eq 1 ]; then
+        if [ "$PREV_MIRROR_PLIST" -eq 1 ]; then
+            printf '  cp "%s/%s" "%s"\n' "$BACKUP_DIR" "$MIRROR_PLIST_NAME" "$MIRROR_PLIST"
+        else
+            printf '  rm "%s"\n' "$MIRROR_PLIST"
+        fi
+    fi
+    printf '(A bootout line reports an error if that agent was not loaded; that is fine.)\n'
     return 0
 }
 trap on_exit EXIT
@@ -126,6 +163,8 @@ step "2. Take private copies and require them to match GitHub's main"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/vm-autostart.XXXXXX")
 cp "$LIB_DIR/vm-autostart.sh" "$WORK/vm-autostart.sh"
 cp "$LIB_DIR/launchagent.plist.template" "$WORK/launchagent.plist.template"
+cp "$LIB_DIR/backup-mirror.sh" "$WORK/backup-mirror.sh"
+cp "$LIB_DIR/backup-mirror.plist.template" "$WORK/backup-mirror.plist.template"
 cp "$ENV_ABS" "$WORK/product.settings"
 # A fresh clone outside the working tree, from the URL given on the command
 # line, run from inside WORK: git run in the checkout would honour its hooks
@@ -139,6 +178,8 @@ GIT_NO_REPLACE_OBJECTS=1 git -C "$WORK" -c core.hooksPath=/dev/null clone -q --d
 git -C "$WORK/origin" show "HEAD:$SRC_REL" > "$WORK/main-vm-autostart.sh" || stop "could not read $SRC_REL from GitHub's main"
 git -C "$WORK/origin" show "HEAD:$TPL_REL" > "$WORK/main-template" || stop "could not read $TPL_REL from GitHub's main"
 git -C "$WORK/origin" show "HEAD:$ENV_REL" > "$WORK/main-product.settings" || stop "could not read $ENV_REL from GitHub's main"
+git -C "$WORK/origin" show "HEAD:$MIRROR_REL" > "$WORK/main-backup-mirror.sh" || stop "could not read $MIRROR_REL from GitHub's main"
+git -C "$WORK/origin" show "HEAD:$MIRROR_TPL_REL" > "$WORK/main-mirror-template" || stop "could not read $MIRROR_TPL_REL from GitHub's main"
 if ! cmp -s "$WORK/vm-autostart.sh" "$WORK/main-vm-autostart.sh"; then
     diff "$WORK/main-vm-autostart.sh" "$WORK/vm-autostart.sh" | head -40 || true
     stop "the working-tree $SRC_REL differs from GitHub's main (diff above: main first)"
@@ -151,7 +192,15 @@ if ! cmp -s "$WORK/product.settings" "$WORK/main-product.settings"; then
     diff "$WORK/main-product.settings" "$WORK/product.settings" | head -40 || true
     stop "the working-tree $ENV_REL differs from GitHub's main (diff above: main first)"
 fi
-echo "ok: all three files match main of $ORIGIN_URL at $(git -C "$WORK/origin" rev-parse --short HEAD)"
+if ! cmp -s "$WORK/backup-mirror.sh" "$WORK/main-backup-mirror.sh"; then
+    diff "$WORK/main-backup-mirror.sh" "$WORK/backup-mirror.sh" | head -40 || true
+    stop "the working-tree $MIRROR_REL differs from GitHub's main (diff above: main first)"
+fi
+if ! cmp -s "$WORK/backup-mirror.plist.template" "$WORK/main-mirror-template"; then
+    diff "$WORK/main-mirror-template" "$WORK/backup-mirror.plist.template" | head -40 || true
+    stop "the working-tree $MIRROR_TPL_REL differs from GitHub's main (diff above: main first)"
+fi
+echo "ok: all five files match main of $ORIGIN_URL at $(git -C "$WORK/origin" rev-parse --short HEAD)"
 echo "script sha256: $(shasum -a 256 "$WORK/vm-autostart.sh" | cut -d' ' -f1)"
 
 # Only now read the settings, and from the clone, never the working tree.
@@ -199,12 +248,33 @@ PGDATA_VOLUME="${COMPOSE_PROJECT}_${DB_VOLUME}"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="$DEST_DIR/backup-$STAMP"
 export DOCKER_HOST="unix://${COLIMA_HOME}/${COLIMA_PROFILE}/docker.sock"
+# The backup mirror is optional: BACKUP_MIRROR_DIR empty installs none.
+# backup-mirror.sh checks the directories itself on every run.
+if [ -n "${BACKUP_MIRROR_DIR:-}" ]; then
+    MIRROR=1
+    MIRROR_TIME="${BACKUP_MIRROR_TIME:-03:00}"
+    case "$MIRROR_TIME" in
+        [01][0-9]:[0-5][0-9] | 2[0-3]:[0-5][0-9]) ;;
+        *) stop "BACKUP_MIRROR_TIME must be HH:MM, 00:00 to 23:59 (got $MIRROR_TIME)" ;;
+    esac
+    # 10# so 08 and 09 are read as decimal, not as bad octal.
+    MIRROR_HOUR=$((10#${MIRROR_TIME%:*}))
+    MIRROR_MINUTE=$((10#${MIRROR_TIME#*:}))
+    MIRROR_DEST="$DEST_DIR/backup-mirror.sh"
+    MIRROR_PLIST_NAME="${LAUNCH_LABEL}.backup-mirror.plist"
+    MIRROR_PLIST="$HOME/Library/LaunchAgents/$MIRROR_PLIST_NAME"
+    MIRROR_LABEL="$DOMAIN/${LAUNCH_LABEL}.backup-mirror"
+    MIRROR_LOG_BASE="$HOME/Library/Logs/${PRODUCT}-backup-mirror"
+fi
 
 step "3. The agent must not already be loaded"
 if launchctl print "$LABEL" >/dev/null 2>&1; then
     stop "$LAUNCH_LABEL is already loaded. Unload it deliberately first if you mean to reinstall: launchctl bootout $LABEL"
 fi
 echo "not loaded"
+if [ "$MIRROR" -eq 1 ] && launchctl print "$MIRROR_LABEL" >/dev/null 2>&1; then
+    stop "${LAUNCH_LABEL}.backup-mirror is already loaded. Unload it deliberately first if you mean to reinstall: launchctl bootout $MIRROR_LABEL"
+fi
 
 step "4. Check the copies' contents and render the plist"
 bash -n "$WORK/vm-autostart.sh" || stop "vm-autostart.sh does not parse"
@@ -225,6 +295,22 @@ plutil -lint "$WORK/$PLIST_NAME" >/dev/null || stop "the plist is not a valid pl
 grep -qF "<string>${LAUNCH_LABEL}</string>" "$WORK/$PLIST_NAME" || stop "the plist has an unexpected label"
 grep -qF "<string>$DEST</string>" "$WORK/$PLIST_NAME" || stop "the plist does not run $DEST"
 echo "ok: script parses and has both fixes; plist is valid and runs $DEST"
+if [ "$MIRROR" -eq 1 ]; then
+    bash -n "$WORK/backup-mirror.sh" || stop "backup-mirror.sh does not parse"
+    case "$MIRROR_LOG_BASE" in
+        *[\<\>\&\"\']*) stop "the mirror log path must not contain any of <>&\"' (got $MIRROR_LOG_BASE)" ;;
+    esac
+    sed -e "s|__MIRROR_LABEL__|$(esc "${LAUNCH_LABEL}.backup-mirror")|g" \
+        -e "s|__MIRROR_SCRIPT_PATH__|$(esc "$MIRROR_DEST")|g" \
+        -e "s|__MIRROR_HOUR__|$MIRROR_HOUR|g" \
+        -e "s|__MIRROR_MINUTE__|$MIRROR_MINUTE|g" \
+        -e "s|__MIRROR_LOG_BASE__|$(esc "$MIRROR_LOG_BASE")|g" \
+        "$WORK/backup-mirror.plist.template" > "$WORK/$MIRROR_PLIST_NAME"
+    ! grep -q '__[A-Z_]*__' "$WORK/$MIRROR_PLIST_NAME" || stop "the rendered mirror plist still has a placeholder"
+    plutil -lint "$WORK/$MIRROR_PLIST_NAME" >/dev/null || stop "the mirror plist is not a valid plist"
+    grep -qF "<string>$MIRROR_DEST</string>" "$WORK/$MIRROR_PLIST_NAME" || stop "the mirror plist does not run $MIRROR_DEST"
+    echo "ok: backup-mirror.sh parses; its plist is valid and runs $MIRROR_DEST daily at $MIRROR_TIME"
+fi
 
 step "5. docker must answer on the agent's socket and the database volume must exist"
 volumes=$(docker volume ls --format '{{.Name}}' 2>&1) || stop "docker did not answer on $DOCKER_HOST: $volumes"
@@ -254,6 +340,16 @@ if [ -f "$PLIST" ]; then
 else
     echo "no installed plist to save"
 fi
+if [ "$MIRROR" -eq 1 ] && [ -f "$MIRROR_DEST" ]; then
+    cp -p "$MIRROR_DEST" "$BACKUP_DIR/backup-mirror.sh"
+    PREV_MIRROR=1
+    echo "saved the installed mirror script"
+fi
+if [ "$MIRROR" -eq 1 ] && [ -f "$MIRROR_PLIST" ]; then
+    cp -p "$MIRROR_PLIST" "$BACKUP_DIR/$MIRROR_PLIST_NAME"
+    PREV_MIRROR_PLIST=1
+    echo "saved the installed mirror plist"
+fi
 echo "backups in $BACKUP_DIR"
 
 step "7. Install the checked copies"
@@ -267,11 +363,26 @@ PLIST_REPLACED=1
 cp "$WORK/$PLIST_NAME" "$PLIST"
 cmp -s "$WORK/$PLIST_NAME" "$PLIST" || stop "the installed plist does not match the checked copy"
 echo "installed $DEST, $DEST_ENV and $PLIST"
+if [ "$MIRROR" -eq 1 ]; then
+    MIRROR_REPLACED=1
+    cp "$WORK/backup-mirror.sh" "$MIRROR_DEST"
+    cmp -s "$WORK/backup-mirror.sh" "$MIRROR_DEST" || stop "the installed mirror script does not match the checked copy"
+    MIRROR_PLIST_REPLACED=1
+    cp "$WORK/$MIRROR_PLIST_NAME" "$MIRROR_PLIST"
+    cmp -s "$WORK/$MIRROR_PLIST_NAME" "$MIRROR_PLIST" || stop "the installed mirror plist does not match the checked copy"
+    echo "installed $MIRROR_DEST and $MIRROR_PLIST"
+fi
 
 step "8. Load the agent (this runs the script once, now)"
 launchctl bootstrap "$DOMAIN" "$PLIST"
 LOADED=1
 echo "loaded"
+if [ "$MIRROR" -eq 1 ]; then
+    # No RunAtLoad: this only schedules the first copy for BACKUP_MIRROR_TIME.
+    launchctl bootstrap "$DOMAIN" "$MIRROR_PLIST"
+    MIRROR_LOADED=1
+    echo "mirror agent loaded; first run at $MIRROR_TIME"
+fi
 
 step "9. Wait for that first run to finish (up to 5 minutes)"
 finished=0
