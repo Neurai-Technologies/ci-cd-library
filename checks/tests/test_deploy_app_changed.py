@@ -67,18 +67,27 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
         "deploy": commit("deploy", {"deploy/compose.yml": "changed"}),
         "lookalike": commit("look-alike folder", {"site-old/notes.txt": "kept"}),
         "other_markdown": commit("markdown", {"backend/CHANGES.md": "notes"}),
+        "outside_paths": commit("outside", {"mobile/app.txt": "one"}),
+        "inside_paths": commit("inside", {"backend/main.py": "five"}),
+        "inside_but_ignored": commit("inside ignored", {"backend/NOTES.md": "notes"}),
     }
     shas["path"] = str(path)
     return shas
 
 
 def app_changed(
-    repo: dict[str, str], current: str, sha: str, ignore: str = IGNORE, cwd: Path | None = None
+    repo: dict[str, str],
+    current: str,
+    sha: str,
+    ignore: str = IGNORE,
+    cwd: Path | None = None,
+    paths: str = "",
 ) -> bool:
     """Run the shipped predicate. True when the server would be recreated."""
     harness = (
         "set -u\n"
         f"SRC={shlex.quote(repo['path'])}\nBRANCH=main\nAPP_IGNORE_PATHS={shlex.quote(ignore)}\n"
+        f"APP_PATHS={shlex.quote(paths)}\n"
         # The daemon fetches when it has never seen the sha. Here every commit
         # is already present, and a stub that fails proves the fetch is not
         # what any of these answers depends on.
@@ -163,3 +172,23 @@ def test_a_sha_this_clone_has_never_seen_counts_as_a_change(repo: dict[str, str]
 
 def test_a_marker_that_has_gone_missing_counts_as_a_change(repo: dict[str, str]) -> None:
     assert app_changed(repo, "0" * 40, repo["backend"])
+
+
+def test_a_change_outside_app_paths_does_not_restart_the_server(repo: dict[str, str]) -> None:
+    """APP_PATHS is an include list: a commit touching none of it is not the app."""
+    assert not app_changed(repo, repo["other_markdown"], repo["outside_paths"], paths="backend/ deploy/")
+
+
+def test_a_change_inside_app_paths_restarts_the_server(repo: dict[str, str]) -> None:
+    assert app_changed(repo, repo["outside_paths"], repo["inside_paths"], paths="backend/ deploy/")
+
+
+def test_an_ignored_path_inside_app_paths_does_not_restart_the_server(repo: dict[str, str]) -> None:
+    """Both lists combine: APP_IGNORE_PATHS still excludes from within APP_PATHS."""
+    assert not app_changed(repo, repo["inside_paths"], repo["inside_but_ignored"], paths="backend/ deploy/")
+
+
+def test_blank_app_paths_means_the_whole_tree(repo: dict[str, str]) -> None:
+    """Empty or blank APP_PATHS keeps today's behaviour, also under set -u."""
+    assert app_changed(repo, repo["other_markdown"], repo["outside_paths"], paths="")
+    assert app_changed(repo, repo["other_markdown"], repo["outside_paths"], paths="  ")

@@ -33,6 +33,8 @@ set -euo pipefail
 : "${LIBRARY_DIR:?LIBRARY_DIR must be set (product.settings)}"
 : "${ENV_FILES:?ENV_FILES must be set (product.settings)}"
 : "${APP_IGNORE_PATHS?APP_IGNORE_PATHS must be set, empty for none (product.settings)}"
+# Optional include list for app_changed; empty means the whole tree.
+APP_PATHS="${APP_PATHS:-}"
 : "${SITE_URL:?SITE_URL must be set (product.settings)}"
 : "${DB_SERVICE:?DB_SERVICE must be set (product.settings)}"
 : "${DB_VOLUME:?DB_VOLUME must be set (product.settings)}"
@@ -590,12 +592,17 @@ app_changed() {
     # entirely inside them does not warrant recreating the app stack - a
     # restart drops connections and re-runs migrations for a change to files
     # this container never reads. APP_IGNORE_PATHS lists those paths (git
-    # pathspecs, space-separated); empty, every change deploys.
+    # pathspecs, space-separated); empty, every change deploys. APP_PATHS,
+    # when set, narrows the diff to those paths first (an include list), and
+    # APP_IGNORE_PATHS still excludes from within them.
     #
     # Anything ambiguous - a first deploy, a missing object, a diff that
     # errors - counts as changed, so the failure direction is a harmless
     # redeploy rather than a silent skip of a real one.
-    local current="$1" sha="$2" path ignore excludes=()
+    local current="$1" sha="$2" path ignore includes=() excludes=()
+    read -r -a includes <<<"${APP_PATHS:-}"
+    # An empty (or blank) APP_PATHS keeps the whole-tree diff.
+    [ "${#includes[@]}" -eq 0 ] && includes=(.)
     # read -a splits without globbing, so a pathspec such as *.md stays literal.
     read -r -a ignore <<<"$APP_IGNORE_PATHS"
     # The +-form keeps an empty list from being "unbound" under set -u on old bash.
@@ -606,7 +613,7 @@ app_changed() {
     git -C "$SRC" cat-file -e "${sha}^{commit}" 2>/dev/null \
         || git_authed -C "$SRC" fetch origin "$BRANCH" || return 0
     git -C "$SRC" cat-file -e "${current}^{commit}" 2>/dev/null || return 0
-    if git -C "$SRC" diff --quiet "$current" "$sha" -- . ${excludes[@]+"${excludes[@]}"} 2>/dev/null; then
+    if git -C "$SRC" diff --quiet "$current" "$sha" -- "${includes[@]}" ${excludes[@]+"${excludes[@]}"} 2>/dev/null; then
         return 1
     fi
     return 0

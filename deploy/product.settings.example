@@ -52,6 +52,9 @@ SRC_DIR=/srv/myproduct-src
 ENV_FILES=".env app.env"
 # Git pathspecs whose changes alone do not redeploy the stack (empty: every change deploys).
 APP_IGNORE_PATHS="site docs *.md"
+# Optional git pathspecs (include list): when set, only changes under them can redeploy the stack.
+# Empty: the whole tree counts. Combines with APP_IGNORE_PATHS, which still excludes paths inside them.
+APP_PATHS=""
 # URL of the site's JSON release marker ({"sha": "<40-hex>"}) that the deployer watches.
 SITE_URL=https://www.example.com/_release.json
 # Name of the database's named volume, without the COMPOSE_PROJECT_ prefix.

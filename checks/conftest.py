@@ -36,6 +36,7 @@ FAKE = {
     "PROMOTE_WORKFLOW": ".github/workflows/fake-promote.yml",
     "ENV_FILES": ".env app.env",
     "APP_IGNORE_PATHS": "site docs *.md",
+    "APP_PATHS": "",
     "SITE_URL": "https://site.invalid/_release.json",
     "DB_VOLUME": "fakevolume",
     "MIGRATE_SERVICE": "fakemigrate",
