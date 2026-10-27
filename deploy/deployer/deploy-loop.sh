@@ -169,15 +169,15 @@ subject_of() {
 }
 
 notify_deployed() {
-    # Every successful deploy is announced (operator's call, 2026-09-12), and one that
-    # ends a run of failures says so, in one message rather than two.
+    # Alerts are for failures only: a successful deploy is a log line, except
+    # one that ends a run of failures, which closes that incident with a message.
     local sha="$1" subject
     subject=$(subject_of "$sha")
     if [ -f "$ALERTED" ]; then
         forget "$ALERTED"
         alert "${PRODUCT} deploy recovered: ${sha:0:7} is live - ${subject}"
     else
-        alert "${PRODUCT} deployed ${sha:0:7} - ${subject}"
+        log "deployed ${sha:0:7} - ${subject}"
     fi
 }
 
@@ -187,7 +187,7 @@ notify_no_app_change() {
     # described that way is a line somebody reads at three in the morning and
     # then mistrusts everything after.
     local sha="$1"
-    alert "${PRODUCT} ${sha:0:7} changes nothing this server runs - $(subject_of "$sha"); site build pending"
+    log "${sha:0:7} changes nothing this server runs - $(subject_of "$sha"); site build pending"
 }
 
 ci_failures() {
@@ -246,7 +246,7 @@ check_site() {
             forget "$SITE_ALERTED"
             alert "${PRODUCT} site build recovered: ${sha:0:7} is published"
         else
-            alert "${PRODUCT} site published ${sha:0:7}"
+            log "site published ${sha:0:7}"
         fi
         run_site_hook "$sha"
         return 0
