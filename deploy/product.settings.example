@@ -79,7 +79,9 @@ WORKER_SERVICE=jobs
 WORKER_READY_CMD="myproduct-worker --ready"
 # Optional executable, relative, run before anything is replaced (a database backup, say),
 # the sha as $1; its failure fails the deploy (empty: none). It runs again on every retry of a
-# failed deploy, so a backup hook must be idempotent and keep its own retention.
+# failed deploy, so a backup hook must be idempotent and keep its own retention. A hook can run
+# `docker compose -p <project> --project-directory <dir> run --rm -T backup once` for one backup
+# cycle with the same encryption, naming and retention as the scheduled ones (non-zero on failure).
 PRE_DEPLOY_HOOK=
 # Optional executable, relative, run after each successful compose up with the sha as $1 (empty: none).
 POST_DEPLOY_HOOK=deploy/post-deploy.sh

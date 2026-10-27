@@ -168,7 +168,20 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    refuses to start with the hook set and the URL empty.
    `PRE_DEPLOY_HOOK` runs again on
    every retry of a failed deploy, so a backup hook must be idempotent and
-   keep its own retention. If `APP_PATHS` (the optional include list in
+   keep its own retention. A database backup hook can run the backup
+   service for one cycle,
+   `docker compose -p <project> --project-directory <dir> run --rm -T backup once`,
+   so the pre-deploy dump gets the same encryption, naming and retention as
+   the scheduled ones; it exits non-zero when the dump fails, or when
+   another backup cycle holds the lock for about 5 minutes. The deployer
+   stops the hook after 900 seconds, so that wait plus one dump must fit
+   inside it: check the dump time against the database's size. Stopping
+   the hook may not stop the container `run` started, which then keeps
+   the lock and makes the retry wait; give it a fixed `--name` and
+   remove it with `docker rm -f <name>` in a trap on exit. Each run
+   adds a full dump kept for `BACKUP_KEEP_DAYS`, so frequent deploys grow
+   the backup directory: size it for the deploys in that window as well as
+   the scheduled dumps. If `APP_PATHS` (the optional include list in
    `product.settings`: only changes under those paths redeploy the stack)
    is set, list the compose file's directory, `product.settings` and the
    hook paths in it too, or a change to them alone is not deployed. A

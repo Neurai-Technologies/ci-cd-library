@@ -3,11 +3,22 @@
 # service (see compose.example.yml); writes to /backups, which is bind-mounted
 # to BACKUP_DIR on the host so the operator can rsync it off-box.
 #
+# With the argument `once` it runs one cycle and exits 0 on success, non-zero
+# on failure (see the bottom). That is for the deployer's PRE_DEPLOY_HOOK:
+#   docker compose -p <project> --project-directory <dir> run --rm -T backup once
+# so the backup taken before a deploy gets the same encryption, naming and
+# retention as the scheduled ones.
+#
 # pipefail is load-bearing: without it a failing pg_dump still exits 0 through
 # gzip|openssl, the empty file gets promoted as a "successful" backup, and
 # retention then ages the real history out night by night.
 set -eu
 set -o pipefail
+
+case "${1:-}" in
+    ""|once) ;;
+    *) echo "usage: backup.sh [once]" >&2; exit 2 ;;
+esac
 
 command -v openssl >/dev/null 2>&1 || {
     echo "openssl is missing from this image; backups cannot be encrypted" >&2
@@ -37,7 +48,7 @@ case "$BACKUP_PREFIX" in
 esac
 
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-14}"
-# The ceiling, enforced whatever the dumps do. See the two prunes in the loop:
+# The ceiling, enforced whatever the dumps do. See the two prunes in cycle():
 # KEEP_DAYS is the ordinary window and only applies after a good write, which
 # leaves the published promise unkept exactly when dumps are failing. This one
 # always runs. It sits under the window /privacy publishes (60 days), and the
@@ -110,8 +121,33 @@ else
     echo "off-site copies off"
 fi
 
-while true; do
-    # A container killed mid-write leaves a .part behind; clear it up front.
+# One cycle at a time on this backup directory: the scheduled service and a
+# pre-deploy `once` share it, and two cycles in the same second would write
+# the same .part. The lock is fd 9 on a file beside the dumps; the kernel
+# drops it when the process dies. busybox flock has no -w, so the wait is
+# bounded here: 60 tries, 5 s apart (59 waits, about 5 minutes), so a
+# pre-deploy `once` still has time to dump inside the deployer's hook limit.
+exec 9>>"${ROOT}/.backup.lock"
+lock() {
+    tries=0
+    until flock -n 9; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 60 ]; then
+            echo "backup lock held by another cycle for about 5 minutes; this cycle skipped" >&2
+            return 1
+        fi
+        sleep 5
+    done
+}
+
+# One cycle, run under the lock: sweep, prune at the ceiling, dump, check,
+# prune at the window. A failed dump is reported here and leaves
+# result=failed; anything else that fails still stops the script through
+# set -e.
+cycle() {
+    result=ok
+    # A container killed mid-write leaves a .part behind. Under the lock, so
+    # no .part here belongs to a running cycle.
     find "$ROOT" -name '*.part' -delete
     # The ceiling, before the dump is attempted and whatever it does. Retention
     # used to live entirely in the success branch below, so a database too
@@ -147,8 +183,24 @@ while true; do
     else
         rm -f "$tmp" "${out}.hmac"
         echo "backup FAILED at ${ts}" >&2
+        result=failed
     fi
-    # Every 6h from container start (plus the dump-on-start above): the dumps
+}
+
+# `once`: one cycle now, then exit with its result.
+if [ "${1:-}" = once ]; then
+    lock || exit 1
+    cycle
+    [ "$result" = ok ] || exit 1
+    exit 0
+fi
+
+while true; do
+    if lock; then
+        cycle
+        flock -u 9
+    fi
+    # Every 6h from container start (the first cycle runs at start): the dumps
     # are the only disaster path, and 2026-09-01 proved the loss window is
     # whatever this interval is. A restart just moves the window.
     sleep 21600
