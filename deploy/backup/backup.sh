@@ -24,6 +24,13 @@ command -v openssl >/dev/null 2>&1 || {
     echo "openssl is missing from this image; backups cannot be encrypted" >&2
     exit 1
 }
+# lock() below cannot tell a missing flock from a busy lock (busybox flock -n
+# exits 1 for both contention and any other error), so without this every
+# cycle would be skipped as "held by another cycle".
+command -v flock >/dev/null 2>&1 || {
+    echo "flock is missing from this image; backup cycles cannot be serialised" >&2
+    exit 1
+}
 : "${BACKUP_PASSPHRASE:?BACKUP_PASSPHRASE must be set}"
 # The label-only salt the .hmac sidecars are keyed under; restore.sh reads
 # the same key. Required, with no default: changing it invalidates the

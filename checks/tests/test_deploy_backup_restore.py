@@ -449,6 +449,41 @@ def test_backup_refuses_any_other_argument(tmp_path: Path, env: ProductSettings,
     assert not (tmp_path / "dumped").exists()
 
 
+@pytest.mark.parametrize("args", [(), ("once",)])
+def test_backup_refuses_to_start_without_flock(
+    tmp_path: Path, env: ProductSettings, args: tuple[str, ...]
+) -> None:
+    """lock() cannot tell a missing flock from a busy lock, so without this
+    check every cycle would be skipped as held by another one."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Only what the script needs before the check, and pg_dump to prove no dump ran.
+    openssl = shutil.which("openssl")
+    assert openssl
+    (bin_dir / "openssl").symlink_to(openssl)
+    fake(bin_dir, "pg_dump", f'touch "{tmp_path / "dumped"}"\n')
+    bash = shutil.which("bash")
+    assert bash
+    result = subprocess.run(
+        [bash, str(BACKUP), *args],
+        env={
+            **env.values,
+            "PATH": str(bin_dir),
+            "BACKUP_PASSPHRASE": PASSPHRASE,
+            "BACKUP_ROOT": str(tmp_path / "backups"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert "flock is missing from this image" in result.stderr, result.stderr
+    assert not (tmp_path / "dumped").exists()
+    assert not (tmp_path / "backups").exists()
+
+
 def test_backup_and_restore_derive_the_same_mac(tmp_path: Path) -> None:
     sample = tmp_path / "sample"
     sample.write_bytes(b"ciphertext")
