@@ -159,7 +159,12 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    the deploy), `POST_DEPLOY_HOOK` (run after each
    successful deploy, the SHA as `$1`) and `SITE_RELEASE_HOOK` (run when the
    site serves a new SHA, `$1` that SHA, `$2` the last one it succeeded
-   for). Leave any key empty to skip it.
+   for). Leave any key empty to skip it. `PRE_DEPLOY_HOOK` runs again on
+   every retry of a failed deploy, so a backup hook must be idempotent and
+   keep its own retention. If `APP_PATHS` (the optional include list in
+   `product.settings`: only changes under those paths redeploy the stack)
+   is set, list the compose file's directory, `product.settings` and the
+   hook paths in it too, or a change to them alone is not deployed.
 
    The deployer runs these hooks, the compose file and `product.settings`
    from its deploy-branch clone, with the docker socket and the `.env`
