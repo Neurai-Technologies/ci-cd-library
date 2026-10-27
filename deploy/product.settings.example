@@ -57,7 +57,9 @@ APP_IGNORE_PATHS="site docs *.md"
 # When set, list the compose file's directory, product.settings and the hook paths too, or a change to them alone is not deployed.
 # A pathspec that matches no file at the commit under consideration fails the attempt with an alert; it is never counted as no app change.
 APP_PATHS=""
-# URL of the site's JSON release marker ({"sha": "<40-hex>"}) that the deployer watches.
+# Optional: URL of the site's JSON release marker ({"sha": "<40-hex>"}) that the deployer watches.
+# Empty: no site check (no pending state, no site alerts). SITE_RELEASE_HOOK requires it; setting
+# the hook without it stops the deployer at startup.
 SITE_URL=https://www.example.com/_release.json
 # Name of the database's named volume, without the COMPOSE_PROJECT_ prefix.
 DB_VOLUME=dbdata
@@ -82,6 +84,7 @@ PRE_DEPLOY_HOOK=
 # Optional executable, relative, run after each successful compose up with the sha as $1 (empty: none).
 POST_DEPLOY_HOOK=deploy/post-deploy.sh
 # Optional executable, relative, run when the site serves a new sha: $1 that sha, $2 the last sha it succeeded for (empty: none).
+# Needs SITE_URL.
 SITE_RELEASE_HOOK=deploy/site-release.sh
 
 # ---- Backup ----------------------------------------------------------------
