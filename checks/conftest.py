@@ -44,6 +44,7 @@ FAKE = {
     "API_READY_CMD": "fake-api --ready",
     "WORKER_SERVICE": "fakeworker",
     "WORKER_READY_CMD": "fake-worker --ready",
+    "PRE_DEPLOY_HOOK": "",
     "POST_DEPLOY_HOOK": "",
     "SITE_RELEASE_HOOK": "",
     "DB_BACKUP_USER": "fakereader",

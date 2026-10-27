@@ -68,6 +68,9 @@ API_READY_CMD="myproduct-api --ready"
 WORKER_SERVICE=jobs
 # Command run in WORKER_SERVICE; exits 0 only when the worker is ready (split on spaces).
 WORKER_READY_CMD="myproduct-worker --ready"
+# Optional executable, relative, run before anything is replaced (a database backup, say),
+# the sha as $1; its failure fails the deploy (empty: none).
+PRE_DEPLOY_HOOK=
 # Optional executable, relative, run after each successful compose up with the sha as $1 (empty: none).
 POST_DEPLOY_HOOK=deploy/post-deploy.sh
 # Optional executable, relative, run when the site serves a new sha: $1 that sha, $2 the last sha it succeeded for (empty: none).

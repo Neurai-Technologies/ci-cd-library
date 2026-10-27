@@ -67,7 +67,7 @@ def deploy(
     code = (
         "set -euo pipefail\n"
         f". {shlex.quote(str(env.path))}\n"
-        f"SRC={shlex.quote(str(src))}; STATE={shlex.quote(str(state))}; HOOK={shlex.quote(hook)}; "
+        f"SRC={shlex.quote(str(src))}; STATE={shlex.quote(str(state))}; HOOK={shlex.quote(hook)}; PRE_HOOK=''; "
         f'COMPOSE_DIR_ABS="$SRC/$COMPOSE_DIR"; BRANCH=main; FAILED_STEP=""\n'
         + stubs
         + lift(LOOP, "deploy")

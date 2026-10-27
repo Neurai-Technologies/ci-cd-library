@@ -153,11 +153,13 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    `logarchive` network. Keep the `depends_on` name equal to `DB_SERVICE`
    and the `/host-env` mounts equal to `ENV_FILES`. Adjust the relative
    build paths if the compose file is not in `deploy/`.
-5. Add the two hooks if the product needs them, as executable files at the
-   paths `product.settings` names: `POST_DEPLOY_HOOK` (run after each
+5. Add the hooks if the product needs them, as executable files at the
+   paths `product.settings` names: `PRE_DEPLOY_HOOK` (run before anything is
+   replaced, such as a database backup, the SHA as `$1`; its failure fails
+   the deploy), `POST_DEPLOY_HOOK` (run after each
    successful deploy, the SHA as `$1`) and `SITE_RELEASE_HOOK` (run when the
    site serves a new SHA, `$1` that SHA, `$2` the last one it succeeded
-   for). Leave either key empty to skip it.
+   for). Leave any key empty to skip it.
 
    The deployer runs these hooks, the compose file and `product.settings`
    from its deploy-branch clone, with the docker socket and the `.env`

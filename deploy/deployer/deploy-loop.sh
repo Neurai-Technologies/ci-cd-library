@@ -55,6 +55,8 @@ STATE="${SRC_DIR}/deployed-sha"
 COMPOSE_DIR_ABS="${SRC}/${COMPOSE_DIR}"
 # Optional: a script in the clone, run after every successful `up`.
 HOOK="${POST_DEPLOY_HOOK:-}"
+# Optional: a script in the clone, run before anything is replaced.
+PRE_HOOK="${PRE_DEPLOY_HOOK:-}"
 # Optional: a script in the clone, run when the site serves a new sha.
 SITE_HOOK="${SITE_RELEASE_HOOK:-}"
 # The space-separated settings are split where they are used with read -a,
@@ -488,6 +490,23 @@ deploy() {
     sync_env || return 1
     FAILED_STEP="schema check"
     schema_compatible || return 1
+    # The product's own pre-deploy step (a database backup, say), which must
+    # succeed before anything running is replaced. Same rules as the
+    # post-deploy hook below: from the clone at this sha, from its root, the
+    # sha as its argument, without the token or the alert URL, under a
+    # timeout. Fatal: a failure leaves the running stack as it is, is retried
+    # next tick and alerted once. Set but missing, not executable or a
+    # symlink fails the deploy, never a silent skip.
+    if [ -n "$PRE_HOOK" ]; then
+        FAILED_STEP="pre-deploy hook"
+        if [ -L "$SRC/$PRE_HOOK" ] || [ ! -f "$SRC/$PRE_HOOK" ] || [ ! -x "$SRC/$PRE_HOOK" ]; then
+            log "pre-deploy hook ${PRE_HOOK} is missing or not executable, or is a symlink"
+            return 1
+        fi
+        log "running pre-deploy hook ${PRE_HOOK}"
+        (cd "$SRC" && env -u GITHUB_DEPLOY_TOKEN -u DEPLOY_ALERT_URL \
+            timeout 900 "$SRC/$PRE_HOOK" "$sha") || return 1
+    fi
     # -p COMPOSE_PROJECT: pin the project name so this always adopts the one running
     # stack (and its volumes) no matter where the compose file lives.
     # No profile selected, so the ops profile (this container) is excluded:
@@ -592,6 +611,10 @@ if [ -n "$SITE_HOOK" ] && ! hook_path_ok "$SITE_HOOK"; then
     log "SITE_RELEASE_HOOK must be a path inside the repository (not absolute, no ..): ${SITE_HOOK}; site hook off"
     alert "${PRODUCT} site release hook OFF: SITE_RELEASE_HOOK is not a path inside the repository"
     SITE_HOOK=""
+fi
+if [ -n "$PRE_HOOK" ] && ! hook_path_ok "$PRE_HOOK"; then
+    log "PRE_DEPLOY_HOOK must be a path inside the repository (not absolute, no ..): ${PRE_HOOK}"
+    exit 1
 fi
 render_policy || { log "could not write ${SCRIPT_DIR}/ci-policy.json"; exit 1; }
 ensure_clone
