@@ -35,7 +35,14 @@ set -euo pipefail
 : "${APP_IGNORE_PATHS?APP_IGNORE_PATHS must be set, empty for none (product.settings)}"
 # Optional include list for app_changed; empty means the whole tree.
 APP_PATHS="${APP_PATHS:-}"
-: "${SITE_URL:?SITE_URL must be set (product.settings)}"
+# The site's release marker is optional: empty means no site check at all.
+# The site release hook runs only once the marker shows a new sha, so it
+# needs the marker.
+SITE_URL="${SITE_URL:-}"
+if [ -z "$SITE_URL" ] && [ -n "${SITE_RELEASE_HOOK:-}" ]; then
+    echo "SITE_RELEASE_HOOK needs SITE_URL: set SITE_URL, or leave SITE_RELEASE_HOOK empty (product.settings)" >&2
+    exit 1
+fi
 : "${DB_SERVICE:?DB_SERVICE must be set (product.settings)}"
 : "${DB_VOLUME:?DB_VOLUME must be set (product.settings)}"
 : "${MIGRATE_SERVICE:?MIGRATE_SERVICE must be set (product.settings)}"
@@ -115,7 +122,7 @@ FAILED_STEP=""
 # that holds the alert URL: the ci branch, where tests, the secret scan and
 # promotion run (a sha that fails there never reaches main, so the main loop
 # below would never see it), and the site build, which publishes
-# every main sha to the release marker at SITE_URL.
+# every main sha to the release marker at SITE_URL (when one is set).
 CI_BRANCH="${SOURCE_BRANCH:-ci}"
 CI_ALERTED="${SRC_DIR}/ci-alerted-sha"
 SITE_GRACE="${DEPLOY_SITE_GRACE_SECONDS:-1500}"
@@ -230,6 +237,8 @@ mark_site_pending() {
     # Superseded silently: a newer sha replaces an older one still pending,
     # and takes its own alert state with it. Fail-open: a marker that could
     # not be written must not turn a live deploy into a reported failure.
+    # No release marker configured: nothing to wait for.
+    [ -n "$SITE_URL" ] || return 0
     forget "$SITE_ALERTED"
     printf '%s %s\n' "$1" "$(date +%s)" 2>/dev/null >"$SITE_PENDING" || log "could not write ${SITE_PENDING}"
     return 0
@@ -238,7 +247,9 @@ mark_site_pending() {
 check_site() {
     # The release marker carries the sha the site was last built from. Published
     # inside the grace period is a success message; past it, one alert per
-    # sha, and a recovery message when it lands after all.
+    # sha, and a recovery message when it lands after all. No release marker
+    # configured: never polled, never alerted.
+    [ -n "$SITE_URL" ] || return 0
     [ -f "$SITE_PENDING" ] || return 0
     local sha="" stamped="" live now
     # read fails on an empty file or a line with no newline, and under set -e
@@ -657,8 +668,13 @@ ensure_clone
 EMPTY_TREE="$(git -C "$SRC" hash-object -t tree /dev/null)"
 log "watching ${REPO}@${BRANCH} every ${POLL}s"
 # A grace period that is not a number would make every site check's test
-# fail quietly; fall back to the default and say so.
-[[ "$SITE_GRACE" =~ ^[0-9]+$ ]] || { log "DEPLOY_SITE_GRACE_SECONDS is not a number (${SITE_GRACE}); using 1500"; SITE_GRACE=1500; }
+# fail quietly; fall back to the default and say so. Without a release
+# marker the grace period is never used.
+if [ -n "$SITE_URL" ]; then
+    [[ "$SITE_GRACE" =~ ^[0-9]+$ ]] || { log "DEPLOY_SITE_GRACE_SECONDS is not a number (${SITE_GRACE}); using 1500"; SITE_GRACE=1500; }
+else
+    log "no site marker configured"
+fi
 # Say at startup whether alerts will work, not only when one is needed.
 if [ -n "$ALERT_URL" ]; then
     if alert_url_ok; then log "deploy alerts on"; else log "DEPLOY_ALERT_URL has unexpected characters; alerts off"; fi

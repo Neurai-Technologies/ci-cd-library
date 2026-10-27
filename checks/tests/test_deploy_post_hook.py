@@ -171,6 +171,14 @@ def test_no_worker_readiness_pair_skips_the_worker_check(
     assert not any("fakeworker" in line or "fake-worker" in line for line in calls), calls
 
 
+def test_no_site_marker_still_records_the_deploy(
+    tmp_path: Path, product_settings: Callable[..., ProductSettings], src: Path
+) -> None:
+    result, state = deploy(tmp_path, product_settings, src, hook="", SITE_URL="", SITE_RELEASE_HOOK="")
+    assert "DEPLOYED" in result.stdout, result.stdout + result.stderr
+    assert state.read_text().strip() == SHA
+
+
 def worker_pair_check(service: str, command: str) -> subprocess.CompletedProcess:
     code = (
         "set -euo pipefail\n"

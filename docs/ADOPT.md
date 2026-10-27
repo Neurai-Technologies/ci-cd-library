@@ -159,7 +159,14 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    the deploy), `POST_DEPLOY_HOOK` (run after each
    successful deploy, the SHA as `$1`) and `SITE_RELEASE_HOOK` (run when the
    site serves a new SHA, `$1` that SHA, `$2` the last one it succeeded
-   for). Leave any key empty to skip it. `PRE_DEPLOY_HOOK` runs again on
+   for). Leave any key empty to skip it. The site is watched through
+   `SITE_URL`, its JSON release marker (`{"sha": "<40-hex>"}`): after each
+   deploy the deployer waits for the marker to show that SHA and alerts
+   when it has not within `DEPLOY_SITE_GRACE_SECONDS`. `SITE_URL` is
+   optional; empty means no site check, no site alerts, and the grace
+   period is ignored. `SITE_RELEASE_HOOK` needs `SITE_URL`: the deployer
+   refuses to start with the hook set and the URL empty.
+   `PRE_DEPLOY_HOOK` runs again on
    every retry of a failed deploy, so a backup hook must be idempotent and
    keep its own retention. If `APP_PATHS` (the optional include list in
    `product.settings`: only changes under those paths redeploy the stack)

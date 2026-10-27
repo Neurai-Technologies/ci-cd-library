@@ -20,6 +20,7 @@ import pytest
 
 from conftest import LIBRARY_ROOT, ProductSettings
 from tests.shell import fake, git_env, lift
+from tests.test_deploy_hardening import block
 
 LOOP = LIBRARY_ROOT / "deploy" / "deployer" / "deploy-loop.sh"
 DOCKERFILE = LOOP.parent / "Dockerfile"
@@ -96,11 +97,12 @@ def run(
     commands: str,
     url: str = "https://example.invalid/bot123:abc/sendMessage?chat_id=9",
     site_hook: str = HOOK,
+    site_url: str = "https://example.invalid/_release.json",
 ) -> str:
     prelude = (
         f". {shlex.quote(str(harness['env']))}\n"
         f'ALERT_URL={shlex.quote(url)}; ALERTED="{harness["alerted"]}"; POLL=90; FAILED_STEP="compose up"; '
-        f'CI_BRANCH=ci; CI_ALERTED="{harness["ci_alerted"]}"; SITE_URL=https://example.invalid/_release.json; '
+        f'CI_BRANCH=ci; CI_ALERTED="{harness["ci_alerted"]}"; SITE_URL={shlex.quote(site_url)}; '
         f'SITE_GRACE=1500; SITE_PENDING="{harness["site_pending"]}"; SITE_ALERTED="{harness["site_alerted"]}"; '
         f'SITE_HOOK={shlex.quote(site_hook)}; SITE_HOOKED="{harness["site_hooked"]}"; BRANCH=main; '
         f'{baked_line()}; BEHIND="{harness["behind"]}"; BEHIND_READ=""; BEHIND_SAID=""; UNCOMPARED=""; '
@@ -595,13 +597,66 @@ def test_an_unwritable_state_directory_cannot_end_the_loop(harness: dict[str, Pa
 
 def test_a_grace_period_that_is_not_a_number_falls_back_to_the_default(harness: dict[str, Path]) -> None:
     lines = [
-        line for line in LOOP.read_text(encoding="utf-8").splitlines() if line.startswith('[[ "$SITE_GRACE"')
+        line.strip()
+        for line in LOOP.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith('[[ "$SITE_GRACE"')
     ]
     assert len(lines) == 1, "grace check moved; update this test"
     out = run(harness, f'SITE_GRACE=abc; {lines[0]}; echo "grace=$SITE_GRACE"')
     assert "not a number" in out and "grace=1500" in out
     out = run(harness, f'SITE_GRACE=600; {lines[0]}; echo "grace=$SITE_GRACE"')
     assert "not a number" not in out and "grace=600" in out
+
+
+def site_startup() -> str:
+    return block(LOOP, 'if [ -n "$SITE_URL" ]; then', "fi", ceiling=5)
+
+
+def test_no_site_marker_is_one_startup_line_and_ignores_the_grace_period(harness: dict[str, Path]) -> None:
+    out = run(harness, "SITE_GRACE=abc\n" + site_startup(), site_url="")
+    assert "no site marker configured" in out and "not a number" not in out
+    out = run(harness, "SITE_GRACE=600\n" + site_startup())
+    assert "no site marker configured" not in out
+
+
+def test_no_site_marker_means_no_pending_state_no_poll_and_no_alert(harness: dict[str, Path]) -> None:
+    """After a deploy the loop marks the site pending and checks it every
+    tick; with SITE_URL empty both are no-ops, so nothing is fetched and no
+    site alert can ever go out."""
+    sha = "c" * 40
+    run(harness, f"mark_site_pending {sha}; check_site; check_site", site_url="")
+    assert not harness["site_pending"].exists() and not harness["site_alerted"].exists()
+    assert calls(harness) == []
+    # A marker left from when SITE_URL was set, long past the grace period.
+    harness["site_pending"].write_text(f"{sha} 1\n")
+    run(harness, "check_site; check_site", site_url="")
+    assert calls(harness) == [] and alerts(harness) == []
+    assert not harness["site_alerted"].exists() and not harness["hook_calls"].exists()
+
+
+def site_pair_check(site_url: str, hook: str) -> subprocess.CompletedProcess:
+    code = (
+        "set -euo pipefail\n"
+        f"SITE_URL={shlex.quote(site_url)}; SITE_RELEASE_HOOK={shlex.quote(hook)}\n"
+        + block(LOOP, 'SITE_URL="${SITE_URL:-}"', "fi", ceiling=5)
+        + "echo STARTED\n"
+    )
+    return subprocess.run(["bash", "-c", code], capture_output=True, text=True, check=False)
+
+
+@pytest.mark.parametrize(
+    ("site_url", "hook"),
+    [("", ""), ("https://site.invalid/_release.json", ""), ("https://site.invalid/_release.json", HOOK)],
+)
+def test_a_site_hook_with_its_marker_or_neither_starts_the_loop(site_url: str, hook: str) -> None:
+    result = site_pair_check(site_url, hook)
+    assert result.returncode == 0 and "STARTED" in result.stdout, result.stderr
+
+
+def test_a_site_hook_without_a_site_marker_stops_the_loop() -> None:
+    result = site_pair_check("", HOOK)
+    assert result.returncode != 0 and "STARTED" not in result.stdout
+    assert "SITE_RELEASE_HOOK" in result.stderr and "SITE_URL" in result.stderr
 
 
 def test_a_stamp_with_leading_zeros_is_read_as_decimal(harness: dict[str, Path]) -> None:
