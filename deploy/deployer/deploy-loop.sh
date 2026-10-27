@@ -33,6 +33,8 @@ set -euo pipefail
 : "${LIBRARY_DIR:?LIBRARY_DIR must be set (product.settings)}"
 : "${ENV_FILES:?ENV_FILES must be set (product.settings)}"
 : "${APP_IGNORE_PATHS?APP_IGNORE_PATHS must be set, empty for none (product.settings)}"
+# Optional include list for app_changed; empty means the whole tree.
+APP_PATHS="${APP_PATHS:-}"
 : "${SITE_URL:?SITE_URL must be set (product.settings)}"
 : "${DB_SERVICE:?DB_SERVICE must be set (product.settings)}"
 : "${DB_VOLUME:?DB_VOLUME must be set (product.settings)}"
@@ -40,10 +42,18 @@ set -euo pipefail
 : "${MIGRATE_CHECK_CMD:?MIGRATE_CHECK_CMD must be set (product.settings)}"
 : "${API_SERVICE:?API_SERVICE must be set (product.settings)}"
 : "${API_READY_CMD:?API_READY_CMD must be set (product.settings)}"
-: "${WORKER_SERVICE:?WORKER_SERVICE must be set (product.settings)}"
-: "${WORKER_READY_CMD:?WORKER_READY_CMD must be set (product.settings)}"
+# The worker readiness check is optional, but only as a pair: both set, or both empty.
+WORKER_SERVICE="${WORKER_SERVICE:-}"
+WORKER_READY_CMD="${WORKER_READY_CMD:-}"
+ready_cmds="MIGRATE_CHECK_CMD API_READY_CMD"
+if [ -n "$WORKER_SERVICE" ] && [ -n "$WORKER_READY_CMD" ]; then
+    ready_cmds="$ready_cmds WORKER_READY_CMD"
+elif [ -n "$WORKER_SERVICE" ] || [ -n "$WORKER_READY_CMD" ]; then
+    echo "WORKER_SERVICE and WORKER_READY_CMD must be set together, or both left empty (product.settings)" >&2
+    exit 1
+fi
 # A whitespace-only command would split into no words at all.
-for cmd in MIGRATE_CHECK_CMD API_READY_CMD WORKER_READY_CMD; do
+for cmd in $ready_cmds; do
     [ -n "${!cmd//[[:space:]]/}" ] || { echo "$cmd must not be blank (product.settings)" >&2; exit 1; }
 done
 REPO="$GITHUB_REPO"
@@ -55,6 +65,8 @@ STATE="${SRC_DIR}/deployed-sha"
 COMPOSE_DIR_ABS="${SRC}/${COMPOSE_DIR}"
 # Optional: a script in the clone, run after every successful `up`.
 HOOK="${POST_DEPLOY_HOOK:-}"
+# Optional: a script in the clone, run before anything is replaced.
+PRE_HOOK="${PRE_DEPLOY_HOOK:-}"
 # Optional: a script in the clone, run when the site serves a new sha.
 SITE_HOOK="${SITE_RELEASE_HOOK:-}"
 # The space-separated settings are split where they are used with read -a,
@@ -169,15 +181,15 @@ subject_of() {
 }
 
 notify_deployed() {
-    # Every successful deploy is announced (operator's call, 2026-09-12), and one that
-    # ends a run of failures says so, in one message rather than two.
+    # Alerts are for failures only: a successful deploy is a log line, except
+    # one that ends a run of failures, which closes that incident with a message.
     local sha="$1" subject
     subject=$(subject_of "$sha")
     if [ -f "$ALERTED" ]; then
         forget "$ALERTED"
         alert "${PRODUCT} deploy recovered: ${sha:0:7} is live - ${subject}"
     else
-        alert "${PRODUCT} deployed ${sha:0:7} - ${subject}"
+        log "deployed ${sha:0:7} - ${subject}"
     fi
 }
 
@@ -187,7 +199,7 @@ notify_no_app_change() {
     # described that way is a line somebody reads at three in the morning and
     # then mistrusts everything after.
     local sha="$1"
-    alert "${PRODUCT} ${sha:0:7} changes nothing this server runs - $(subject_of "$sha"); site build pending"
+    log "${sha:0:7} changes nothing this server runs - $(subject_of "$sha"); site build pending"
 }
 
 ci_failures() {
@@ -246,7 +258,7 @@ check_site() {
             forget "$SITE_ALERTED"
             alert "${PRODUCT} site build recovered: ${sha:0:7} is published"
         else
-            alert "${PRODUCT} site published ${sha:0:7}"
+            log "site published ${sha:0:7}"
         fi
         run_site_hook "$sha"
         return 0
@@ -488,6 +500,23 @@ deploy() {
     sync_env || return 1
     FAILED_STEP="schema check"
     schema_compatible || return 1
+    # The product's own pre-deploy step (a database backup, say), which must
+    # succeed before anything running is replaced. Same rules as the
+    # post-deploy hook below: from the clone at this sha, from its root, the
+    # sha as its argument, without the token or the alert URL, under a
+    # timeout. Fatal: a failure leaves the running stack as it is, is retried
+    # next tick and alerted once. Set but missing, not executable or a
+    # symlink fails the deploy, never a silent skip.
+    if [ -n "$PRE_HOOK" ]; then
+        FAILED_STEP="pre-deploy hook"
+        if [ -L "$SRC/$PRE_HOOK" ] || [ ! -f "$SRC/$PRE_HOOK" ] || [ ! -x "$SRC/$PRE_HOOK" ]; then
+            log "pre-deploy hook ${PRE_HOOK} is missing or not executable, or is a symlink"
+            return 1
+        fi
+        log "running pre-deploy hook ${PRE_HOOK}"
+        (cd "$SRC" && env -u GITHUB_DEPLOY_TOKEN -u DEPLOY_ALERT_URL \
+            timeout 900 "$SRC/$PRE_HOOK" "$sha") || return 1
+    fi
     # -p COMPOSE_PROJECT: pin the project name so this always adopts the one running
     # stack (and its volumes) no matter where the compose file lives.
     # No profile selected, so the ops profile (this container) is excluded:
@@ -539,9 +568,13 @@ deploy() {
     docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$API_SERVICE" \
         ${api_ready[@]+"${api_ready[@]}"} || return 1
     # The worker: WORKER_READY_CMD checks its own registration and dependencies.
-    FAILED_STEP="worker readiness"
-    docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$WORKER_SERVICE" \
-        ${worker_ready[@]+"${worker_ready[@]}"} || return 1
+    if [ -n "$WORKER_SERVICE" ]; then
+        FAILED_STEP="worker readiness"
+        docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$WORKER_SERVICE" \
+            ${worker_ready[@]+"${worker_ready[@]}"} || return 1
+    else
+        log "no worker readiness check configured"
+    fi
     # A marker that could not be written is a deploy not recorded: say so
     # once and retry next tick, rather than announcing the same deploy every
     # tick against a stale marker.
@@ -559,12 +592,17 @@ app_changed() {
     # entirely inside them does not warrant recreating the app stack - a
     # restart drops connections and re-runs migrations for a change to files
     # this container never reads. APP_IGNORE_PATHS lists those paths (git
-    # pathspecs, space-separated); empty, every change deploys.
+    # pathspecs, space-separated); empty, every change deploys. APP_PATHS,
+    # when set, narrows the diff to those paths first (an include list), and
+    # APP_IGNORE_PATHS still excludes from within them.
     #
     # Anything ambiguous - a first deploy, a missing object, a diff that
     # errors - counts as changed, so the failure direction is a harmless
-    # redeploy rather than a silent skip of a real one.
-    local current="$1" sha="$2" path ignore excludes=()
+    # redeploy rather than a silent skip of a real one. An APP_PATHS pathspec
+    # that matches nothing at the sha is the one exception: it answers 2, a
+    # failed attempt (see below).
+    local current="$1" sha="$2" path spec ignore includes=() excludes=()
+    read -r -a includes <<<"${APP_PATHS:-}"
     # read -a splits without globbing, so a pathspec such as *.md stays literal.
     read -r -a ignore <<<"$APP_IGNORE_PATHS"
     # The +-form keeps an empty list from being "unbound" under set -u on old bash.
@@ -574,8 +612,24 @@ app_changed() {
     [ -z "$current" ] && return 0
     git -C "$SRC" cat-file -e "${sha}^{commit}" 2>/dev/null \
         || git_authed -C "$SRC" fetch origin "$BRANCH" || return 0
+    # Every APP_PATHS pathspec must match a file in this sha's tree (the diff
+    # from the empty tree lists all of it). One that matches nothing - a typo,
+    # a folder renamed - would leave every diff empty and record every sha as
+    # "no app change", so the server would never redeploy and nothing would
+    # say so. It fails the attempt instead: alerted, not recorded, retried
+    # next tick. A git error fails the same way, and its message stays on
+    # the log.
+    for spec in ${includes[@]+"${includes[@]}"}; do
+        if [ -z "$(git -C "$SRC" diff --name-only "$EMPTY_TREE" "$sha" -- "$spec")" ]; then
+            log "APP_PATHS pathspec ${spec} matches no file at ${sha}"
+            FAILED_STEP="APP_PATHS"
+            return 2
+        fi
+    done
     git -C "$SRC" cat-file -e "${current}^{commit}" 2>/dev/null || return 0
-    if git -C "$SRC" diff --quiet "$current" "$sha" -- . ${excludes[@]+"${excludes[@]}"} 2>/dev/null; then
+    # An empty (or blank) APP_PATHS keeps the whole-tree diff.
+    [ "${#includes[@]}" -eq 0 ] && includes=(.)
+    if git -C "$SRC" diff --quiet "$current" "$sha" -- "${includes[@]}" ${excludes[@]+"${excludes[@]}"} 2>/dev/null; then
         return 1
     fi
     return 0
@@ -593,8 +647,14 @@ if [ -n "$SITE_HOOK" ] && ! hook_path_ok "$SITE_HOOK"; then
     alert "${PRODUCT} site release hook OFF: SITE_RELEASE_HOOK is not a path inside the repository"
     SITE_HOOK=""
 fi
+if [ -n "$PRE_HOOK" ] && ! hook_path_ok "$PRE_HOOK"; then
+    log "PRE_DEPLOY_HOOK must be a path inside the repository (not absolute, no ..): ${PRE_HOOK}"
+    exit 1
+fi
 render_policy || { log "could not write ${SCRIPT_DIR}/ci-policy.json"; exit 1; }
 ensure_clone
+# The empty tree's id in this clone's hash (SHA-1 or SHA-256), for app_changed.
+EMPTY_TREE="$(git -C "$SRC" hash-object -t tree /dev/null)"
 log "watching ${REPO}@${BRANCH} every ${POLL}s"
 # A grace period that is not a number would make every site check's test
 # fail quietly; fall back to the default and say so.
@@ -610,11 +670,16 @@ while true; do
         current="$(cat "$STATE" 2>/dev/null || true)"
         if [ "$sha" != "$current" ]; then
             if ci_green "$sha"; then
-                if app_changed "$current" "$sha"; then
+                changed=0
+                app_changed "$current" "$sha" || changed=$?
+                if [ "$changed" -eq 0 ]; then
                     deploy "$sha" || {
                         log "deploy of ${sha} FAILED at ${FAILED_STEP} - will retry next tick"
                         notify_failure "$sha"
                     }
+                elif [ "$changed" -eq 2 ]; then
+                    log "deploy of ${sha} FAILED at ${FAILED_STEP} - will retry next tick"
+                    notify_failure "$sha"
                 else
                     log "sha ${sha} changes no app code - recording without redeploy"
                     if echo "$sha" 2>/dev/null >"$STATE"; then

@@ -284,7 +284,7 @@ def test_the_published_site_check_runs_the_hook(harness: dict[str, Path]) -> Non
     harness["body"].write_text(f'{{"sha": "{b}"}}')
     run(harness, "check_site")
     assert hook_calls(harness) == [f"{b}|{a}"]
-    assert [line for line in alerts(harness) if "site published" in line]
+    assert alerts(harness) == []
 
 
 def test_no_url_means_no_call(harness: dict[str, Path]) -> None:
@@ -316,28 +316,26 @@ def test_url_travels_by_stdin_not_argv(harness: dict[str, Path]) -> None:
 def test_a_slow_telegram_is_retried_before_the_message_is_given_up_on(harness: dict[str, Path]) -> None:
     """curl treats a timeout as transient, so --retry turns one slow answer
     into a delivered message instead of a log line."""
-    run(harness, "notify_deployed ccccccc3")
+    run(harness, "notify_failure ccccccc3")
     argv = next(line for line in calls(harness) if line.startswith("argv:"))
     assert "--retry 2" in argv and "--max-time 10" in argv
 
 
-def test_every_deploy_is_announced_and_one_after_a_failure_says_recovered(harness: dict[str, Path]) -> None:
-    run(harness, "notify_deployed ccccccc3")
-    sent = alerts(harness)
-    assert len(sent) == 1 and "deployed ccccccc" in sent[0] and "recovered" not in sent[0]
+def test_a_deploy_alerts_only_when_it_ends_a_failure(harness: dict[str, Path]) -> None:
+    out = run(harness, "notify_deployed ccccccc3")
+    assert alerts(harness) == [] and "deployed ccccccc" in out
     run(harness, "notify_failure aaaaaaa1; notify_deployed ccccccc3; notify_deployed ddddddd4")
     sent = alerts(harness)
-    assert len(sent) == 4
-    assert "recovered" in sent[2] and "ccccccc" in sent[2]
-    assert "deployed ddddddd" in sent[3] and "recovered" not in sent[3]
+    assert len(sent) == 2
+    assert "FAILED" in sent[0]
+    assert "recovered" in sent[1] and "ccccccc" in sent[1]
     assert not harness["alerted"].exists()
 
 
-def test_a_sha_that_changes_no_app_code_is_announced_as_such(harness: dict[str, Path]) -> None:
-    run(harness, "notify_no_app_change eeeeeee5")
-    sent = alerts(harness)
-    assert len(sent) == 1
-    assert "changes nothing this server runs" in sent[0] and "eeeeeee" in sent[0]
+def test_a_sha_that_changes_no_app_code_is_logged_not_alerted(harness: dict[str, Path]) -> None:
+    out = run(harness, "notify_no_app_change eeeeeee5")
+    assert alerts(harness) == []
+    assert "changes nothing this server runs" in out and "eeeeeee" in out
 
 
 def runs_response(*runs: tuple[str, str, str]) -> str:
@@ -404,12 +402,11 @@ def test_a_github_read_that_fails_alerts_nothing_and_is_not_fatal(harness: dict[
     assert alerts(harness) == []
 
 
-def test_a_published_site_build_is_announced_and_the_pending_marker_cleared(harness: dict[str, Path]) -> None:
+def test_a_published_site_build_is_logged_not_alerted(harness: dict[str, Path]) -> None:
     sha = "b" * 40
     harness["body"].write_text(f'{{"sha": "{sha}"}}')
-    run(harness, f"mark_site_pending {sha}; check_site; check_site", site_hook="")
-    sent = alerts(harness)
-    assert len(sent) == 1 and "site published bbbbbbb" in sent[0]
+    out = run(harness, f"mark_site_pending {sha}; check_site; check_site", site_hook="")
+    assert alerts(harness) == [] and "site published bbbbbbb" in out
     assert not harness["site_pending"].exists()
 
 
@@ -553,8 +550,8 @@ def test_the_deploy_message_carries_the_commit_subject(harness: dict[str, Path],
         ["git", "-C", str(repo), "commit", "-q", "-m", "fix(x): the subject line"], check=True, env=env
     )
     sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, env=env).strip()
-    run(harness, f'SRC="{repo}"; notify_deployed {sha}')
-    sent = alerts(harness)
+    run(harness, f'SRC="{repo}"; notify_failure {sha}; notify_deployed {sha}')
+    sent = alerts(harness)[1:]
     assert len(sent) == 1 and "fix(x): the subject line" in sent[0]
 
 

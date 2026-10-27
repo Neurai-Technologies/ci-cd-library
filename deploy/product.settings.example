@@ -52,6 +52,11 @@ SRC_DIR=/srv/myproduct-src
 ENV_FILES=".env app.env"
 # Git pathspecs whose changes alone do not redeploy the stack (empty: every change deploys).
 APP_IGNORE_PATHS="site docs *.md"
+# Optional git pathspecs (include list): when set, only changes under them can redeploy the stack.
+# Empty: the whole tree counts. Combines with APP_IGNORE_PATHS, which still excludes paths inside them.
+# When set, list the compose file's directory, product.settings and the hook paths too, or a change to them alone is not deployed.
+# A pathspec that matches no file at the commit under consideration fails the attempt with an alert; it is never counted as no app change.
+APP_PATHS=""
 # URL of the site's JSON release marker ({"sha": "<40-hex>"}) that the deployer watches.
 SITE_URL=https://www.example.com/_release.json
 # Name of the database's named volume, without the COMPOSE_PROJECT_ prefix.
@@ -64,10 +69,16 @@ MIGRATE_CHECK_CMD="myproduct-migrate --check"
 API_SERVICE=api
 # Command run in API_SERVICE; exits 0 only when the API is ready (split on spaces).
 API_READY_CMD="myproduct-api --ready"
-# Compose service of the background worker.
+# Optional, as a pair: compose service of the background worker. Leave both WORKER_SERVICE and
+# WORKER_READY_CMD empty for a product without a worker (the check is skipped); setting only one
+# stops the deployer at startup.
 WORKER_SERVICE=jobs
 # Command run in WORKER_SERVICE; exits 0 only when the worker is ready (split on spaces).
 WORKER_READY_CMD="myproduct-worker --ready"
+# Optional executable, relative, run before anything is replaced (a database backup, say),
+# the sha as $1; its failure fails the deploy (empty: none). It runs again on every retry of a
+# failed deploy, so a backup hook must be idempotent and keep its own retention.
+PRE_DEPLOY_HOOK=
 # Optional executable, relative, run after each successful compose up with the sha as $1 (empty: none).
 POST_DEPLOY_HOOK=deploy/post-deploy.sh
 # Optional executable, relative, run when the site serves a new sha: $1 that sha, $2 the last sha it succeeded for (empty: none).
