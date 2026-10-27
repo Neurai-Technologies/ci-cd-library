@@ -125,7 +125,9 @@ BACKUP_DIR=/srv/myproduct/backups
 DEPLOYER_SERVICE=deployer
 # Compose profile the deployer runs under. Default: ops.
 OPS_PROFILE=ops
-# Database image the restore drill runs. Default: postgres:16.15-alpine.
+# Database image the restore drill runs and the backup image is built from: an exact version
+# tag of the database server's major (pg_dump refuses a newer server). Write the same value in
+# the compose file's backup and logarchive build args. Default: postgres:16.15-alpine.
 POSTGRES_IMAGE=postgres:16.15-alpine
 # Postgres init scripts the restore drill mounts, relative.
 POSTGRES_INIT_DIR=deploy/postgres-init

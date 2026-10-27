@@ -26,7 +26,9 @@ def test_every_service_on_the_backup_image_covers_the_inherited_data_volume_with
     library_root: Path, name: str
 ) -> None:
     service = compose(library_root)["services"][name]
-    assert service["build"].endswith("/deploy/backup"), f"{name} is not built from the backup image"
+    assert service["build"]["context"].endswith("/deploy/backup"), (
+        f"{name} is not built from the backup image"
+    )
     assert DATA_DIR in service.get("tmpfs", []), (
         f"{name}: the inherited VOLUME path needs a tmpfs or every recreate leaks a volume"
     )

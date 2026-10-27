@@ -152,7 +152,14 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    `x-log-bounds` anchor, the `backup-heartbeat` volume and the
    `logarchive` network. Keep the `depends_on` name equal to `DB_SERVICE`
    and the `/host-env` mounts equal to `ENV_FILES`. Adjust the relative
-   build paths if the compose file is not in `deploy/`.
+   build paths if the compose file is not in `deploy/`. Set the
+   `POSTGRES_IMAGE` build arg of `backup` and `logarchive` to the same
+   value as `POSTGRES_IMAGE` in `product.settings`: an exact version tag
+   (`postgres:<major>.<minor>-alpine`, optionally followed by an
+   `@sha256:` digest for a stronger pin) whose major equals the product's
+   database server major, because pg_dump refuses a newer server. The
+   library's default is the 16 line; a product on 17 sets a 17 tag in both
+   places.
 5. Add the hooks if the product needs them, as executable files at the
    paths `product.settings` names: `PRE_DEPLOY_HOOK` (run before anything is
    replaced, such as a database backup, the SHA as `$1`; its failure fails
