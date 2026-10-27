@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 from conftest import LIBRARY_ROOT, example_keys
 
 DEPLOY = LIBRARY_ROOT / "deploy"
@@ -54,6 +56,7 @@ NOT_PRODUCT_KEYS = {
     # overridable only so the scripts can run under a test.
     "BACKUP_ROOT": "container mount path, fixed by compose",
     "BACKUP_HEARTBEAT": "container mount path, fixed by compose",
+    "BACKUP_LOCK_DIR": "container mount path, fixed by compose",
     "LOG_ARCHIVE_ROOT": "container mount path, fixed by compose",
     "LOG_ARCHIVE_STAGE": "container tmpfs path, fixed by compose",
     "DOCKER_LOGS": "container mount path, fixed by compose",
@@ -122,3 +125,53 @@ def test_the_example_holds_no_secret_and_assigns_each_key_once() -> None:
     leaked = [key for key in keys if key in NOT_PRODUCT_KEYS]
     assert not leaked, f"a secret or per-run key is in product.settings.example: {leaked}"
     assert len(keys) == len(set(keys)), sorted({key for key in keys if keys.count(key) > 1})
+
+
+# The script each compose service runs, so a key it reads can be traced to the
+# service that must pin it.
+SERVICE_SCRIPTS = {
+    "backup": DEPLOY / "backup" / "backup.sh",
+    "logarchive": DEPLOY / "backup" / "logarchive.sh",
+    "deployer": DEPLOY / "deployer" / "deploy-loop.sh",
+}
+
+
+def mount_target(volume: str) -> str:
+    """The container path of a short-form compose volume: the last field, less :ro or :rw.
+    The source may itself hold colons (`${BACKUP_DIR:-./backups}`)."""
+    parts = volume.split(":")
+    if parts[-1] in ("ro", "rw"):
+        parts = parts[:-1]
+    return parts[-1]
+
+
+def test_every_path_fixed_by_compose_is_pinned_in_compose() -> None:
+    """env_file loads product.settings into the container, so a path key
+    compose does not set in `environment:` could be moved by a product. Each
+    service that reads such a key pins it to the script's own default, and
+    that default is one of the service's mount or tmpfs paths, inside one, or
+    the folder its file mounts sit in (/host-env)."""
+    fixed = [key for key, why in NOT_PRODUCT_KEYS.items() if "fixed by compose" in why]
+    assert fixed, "no key is labelled fixed by compose; update this test"
+    services = yaml.safe_load((DEPLOY / "compose.example.yml").read_text(encoding="utf-8"))["services"]
+    pinned_somewhere = set()
+    for name, script in SERVICE_SCRIPTS.items():
+        text = script.read_text(encoding="utf-8")
+        service = services[name]
+        targets = [mount_target(str(v)) for v in service.get("volumes", [])] + list(service.get("tmpfs", []))
+        for key in fixed:
+            defaults = re.findall(rf"\$\{{{key}:-([^}}]*)\}}", text)
+            if not defaults:
+                continue
+            assert len(defaults) == 1, f"{script.name} defaults {key} more than once: {defaults}"
+            value = service.get("environment", {}).get(key)
+            assert value == defaults[0], (
+                f"{name}: {key} is {value!r} in compose, {defaults[0]!r} in {script.name}"
+            )
+            assert any(
+                value == t or value.startswith(t + "/") or t.startswith(value + "/") for t in targets
+            ), f"{name}: {key}={value} matches none of its mounts {targets}"
+            pinned_somewhere.add(key)
+    assert pinned_somewhere == set(fixed), (
+        f"labelled fixed by compose but read by no service: {set(fixed) - pinned_somewhere}"
+    )

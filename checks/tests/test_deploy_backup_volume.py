@@ -26,7 +26,9 @@ def test_every_service_on_the_backup_image_covers_the_inherited_data_volume_with
     library_root: Path, name: str
 ) -> None:
     service = compose(library_root)["services"][name]
-    assert service["build"].endswith("/deploy/backup"), f"{name} is not built from the backup image"
+    assert service["build"]["context"].endswith("/deploy/backup"), (
+        f"{name} is not built from the backup image"
+    )
     assert DATA_DIR in service.get("tmpfs", []), (
         f"{name}: the inherited VOLUME path needs a tmpfs or every recreate leaks a volume"
     )
@@ -66,3 +68,19 @@ def test_the_drill_restores_into_the_production_image_with_the_production_init_s
     assert 'cp -R "${REPO_DIR}/${POSTGRES_INIT_DIR}" "$HERE/.init"' in run
     assert "RESTORE_PROJECT=drill" in run, "the drill restores into its own project, never the live one"
     assert ".init/" in (drill_dir / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+
+def test_only_the_backup_service_mounts_the_lock_volume(library_root: Path) -> None:
+    """Any container that can open backup.lock can hold it (flock works on a
+    read-only file too) and stall every cycle; logarchive takes no such lock."""
+    stack = compose(library_root)
+    assert "backup-lock" in stack["volumes"]
+    assert "backup-lock:/lock" in stack["services"]["backup"]["volumes"]
+    # environment: overrides env_file, so product.settings cannot move the lock.
+    assert stack["services"]["backup"]["environment"]["BACKUP_LOCK_DIR"] == "/lock"
+    others = {
+        name: service.get("volumes", [])
+        for name, service in stack["services"].items()
+        if name != "backup" and any(str(v).startswith("backup-lock:") for v in service.get("volumes", []))
+    }
+    assert others == {}, f"backup-lock mounted outside the backup service: {others}"

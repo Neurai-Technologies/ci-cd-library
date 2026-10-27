@@ -149,10 +149,17 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    `SRC_DIR` in `product.settings`, the same path on both sides.
 4. Merge the services of `<LIBRARY_DIR>/deploy/compose.example.yml` into
    the product's compose file: `backup`, `logarchive`, `deployer`, the
-   `x-log-bounds` anchor, the `backup-heartbeat` volume and the
-   `logarchive` network. Keep the `depends_on` name equal to `DB_SERVICE`
+   `x-log-bounds` anchor, the `backup-heartbeat` and `backup-lock`
+   volumes and the `logarchive` network. Keep the `depends_on` name equal to `DB_SERVICE`
    and the `/host-env` mounts equal to `ENV_FILES`. Adjust the relative
-   build paths if the compose file is not in `deploy/`.
+   build paths if the compose file is not in `deploy/`. Set the
+   `POSTGRES_IMAGE` build arg of `backup` and `logarchive` to the same
+   value as `POSTGRES_IMAGE` in `product.settings`: an exact version tag
+   (`postgres:<major>.<minor>-alpine`, optionally followed by an
+   `@sha256:` digest for a stronger pin) whose major equals the product's
+   database server major, because pg_dump refuses a newer server. The
+   library's default is the 16 line; a product on 17 sets a 17 tag in both
+   places.
 5. Add the hooks if the product needs them, as executable files at the
    paths `product.settings` names: `PRE_DEPLOY_HOOK` (run before anything is
    replaced, such as a database backup, the SHA as `$1`; its failure fails
@@ -168,7 +175,25 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    refuses to start with the hook set and the URL empty.
    `PRE_DEPLOY_HOOK` runs again on
    every retry of a failed deploy, so a backup hook must be idempotent and
-   keep its own retention. If `APP_PATHS` (the optional include list in
+   keep its own retention. A database backup hook can run the backup
+   service for one cycle,
+   `docker compose -p <project> --project-directory <dir> run --rm -T backup once`,
+   so the pre-deploy dump gets the same encryption, naming and retention as
+   the scheduled ones; it exits non-zero when the dump fails, or when
+   another backup cycle holds the lock for about 5 minutes. The lock is
+   `backup.lock` on the `backup-lock` volume, which the backup service
+   alone mounts (at `/lock`), so the scheduled service and `run ... once`
+   share it and nothing else can hold it. In the product's own compose
+   file, mount `backup-heartbeat` into the worker read-only and never
+   mount `backup-lock` anywhere but the backup service. The deployer
+   stops the hook after 900 seconds, so that wait plus one dump must fit
+   inside it: check the dump time against the database's size. Stopping
+   the hook may not stop the container `run` started, which then keeps
+   the lock and makes the retry wait; give it a fixed `--name` and
+   remove it with `docker rm -f <name>` in a trap on exit. Each run
+   adds a full dump kept for `BACKUP_KEEP_DAYS`, so frequent deploys grow
+   the backup directory: size it for the deploys in that window as well as
+   the scheduled dumps. If `APP_PATHS` (the optional include list in
    `product.settings`: only changes under those paths redeploy the stack)
    is set, list the compose file's directory, `product.settings` and the
    hook paths in it too, or a change to them alone is not deployed. A
@@ -241,6 +266,45 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
      `${COMPOSE_PROJECT}_${DB_VOLUME}` exists.
    - `flock`, `docker`, `colima` and `git` are on the PATH.
    - The agent is not already loaded.
+
+   Optional backup mirror: with `BACKUP_MIRROR_DIR` set, the same run also
+   installs `backup-mirror.sh` and a second LaunchAgent,
+   `<LAUNCH_LABEL>.backup-mirror`. It copies the encrypted dumps and their
+   `.hmac` sidecars from `BACKUP_DIR` to a second disk once a day at
+   `BACKUP_MIRROR_TIME` (local time; a run missed while the Mac slept runs
+   on wake), and nothing else: no `.part`, no lock file, no log archives.
+   - `BACKUP_MIRROR_VOLUME` is the second disk's mount point and
+     `BACKUP_MIRROR_DIR` a folder inside it, never `BACKUP_DIR` or inside
+     it. With no volume mounted exactly there, the run copies nothing,
+     alerts once a day ("backup mirror: destination not mounted") and
+     exits 0, so a missing drive never fills the system disk.
+   - A copy is never replaced, is checked by size, and each dump is
+     copied with its sidecar (sidecar first) or the run fails. Symlinks in
+     `BACKUP_DIR` are never copied. Copies older than `BACKUP_MIRROR_KEEP_DAYS`
+     (default `BACKUP_KEEP_DAYS`, else 14) are pruned by the dump names
+     only. Age counts from the dump's own time, which the copy keeps, so
+     a dump already past the window is not copied at all.
+   - The real path decides: a `BACKUP_MIRROR_DIR` that resolves, through
+     a symlink, outside `BACKUP_MIRROR_VOLUME` or into `BACKUP_DIR` is
+     refused before anything is written.
+   - Alerts go on failure and on the first good run after one, never on
+     success, to the same webhook as the deployer's: write
+     `DEPLOY_ALERT_URL`'s value, one line, to `alert-url` in
+     `APP_SUPPORT_DIR`. It must be a plain file owned by the operator with
+     mode 600 (`chmod 600`): any other file there stops every run, with a
+     log line and no alert. Without it the log
+     (`~/Library/Logs/<PRODUCT>-backup-mirror.log`) is the only record.
+     `backup-mirror.last-success` in the same folder is the heartbeat; the
+     log and state files are owner-only (umask 077).
+   - The dumps are already encrypted; the mirror adds no encryption and
+     no off-site copy (that is the backup service's R2 upload).
+   - The installer now reads `backup-mirror.sh` and its plist template
+     from `<ORIGIN_URL>`'s main whether or not the mirror is set, so adopt
+     the library release that contains them, merged to main, before
+     running it.
+   - To add the mirror to an installed autostart, unload the autostart
+     agent and run the installer again (loading runs the autostart once;
+     with the volume present it only reports).
 8. Run the restore drill and record the result in the product's
    `docs/restore-rehearsal.md`:
 
@@ -274,7 +338,11 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    ```
 
 4. Compare `deploy/product.settings.example` with your `product.settings`
-   and add any new key.
+   and add any new key. Compare `deploy/compose.example.yml` with your
+   compose file too. Upgrading to the release that adds the `backup-lock`
+   volume: add `backup-lock:/lock` to the backup service's volumes and
+   declare `backup-lock:` under the top-level `volumes:`, or the scheduled
+   backups and the pre-deploy `once` refuse to start.
 5. Run the product's checks and the library checks, then release the
    product through its normal path. Nothing changes in a product until it
    does this.

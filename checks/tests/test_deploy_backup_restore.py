@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -69,11 +70,18 @@ def dumps(root: Path, env: ProductSettings, suffix: str = "") -> list[Path]:
 
 
 def run_backup(
-    tmp_path: Path, env: ProductSettings, dump_fails: bool = False, **extra_env: str
+    tmp_path: Path,
+    env: ProductSettings,
+    dump_fails: bool = False,
+    args: tuple[str, ...] = (),
+    check: bool = True,
+    **extra_env: str,
 ) -> tuple[Path, subprocess.CompletedProcess]:
     """Run backup.sh once for real: fake pg_dump, real gzip and openssl, a fake
     curl that records what it would have uploaded, and a fake sleep that ends
-    the loop after the first dump.
+    the loop after the first dump (and leaves a `slept` file, so a test can
+    tell the loop from `once`) unless the test made its own. args are passed
+    to backup.sh; check=False skips the written/FAILED assertion.
 
     dump_fails drives the case retention was blind to: the database is too
     broken to dump, so the success branch never runs.
@@ -85,7 +93,8 @@ def run_backup(
         "pg_dump",
         "echo 'pg_dump: connection failed' >&2\nexit 1\n" if dump_fails else "printf '%s' \"$FAKE_DUMP\"\n",
     )
-    fake(bin_dir, "sleep", "kill $PPID\n")
+    if not (bin_dir / "sleep").exists():
+        fake(bin_dir, "sleep", f'touch "{tmp_path / "slept"}"\nkill $PPID\n')
     if not (bin_dir / "curl").exists():
         fake(
             bin_dir,
@@ -94,6 +103,9 @@ def run_backup(
         )
     out = tmp_path / "backups"
     out.mkdir(exist_ok=True)
+    # The backup-lock volume compose mounts at /lock.
+    lock_dir = tmp_path / "lock-volume"
+    lock_dir.mkdir(exist_ok=True)
     run_env = {
         **os.environ,
         **env.values,
@@ -101,13 +113,18 @@ def run_backup(
         "BACKUP_PASSPHRASE": PASSPHRASE,
         "BACKUP_ROOT": str(out),
         "BACKUP_HEARTBEAT": str(tmp_path / "no-heartbeat-dir" / "last-success"),
+        "BACKUP_LOCK_DIR": str(lock_dir),
         "FAKE_DUMP": FAKE_DUMP,
         **extra_env,
     }
     # bash, not sh: the container runs busybox ash, which accepts the script's
     # pipefail; the Ubuntu runner's sh is dash, which does not.
-    result = subprocess.run(["bash", str(BACKUP)], env=run_env, capture_output=True, text=True, check=False)
-    if dump_fails:
+    result = subprocess.run(
+        ["bash", str(BACKUP), *args], env=run_env, capture_output=True, text=True, check=False, timeout=60
+    )
+    if not check:
+        pass
+    elif dump_fails:
         assert "backup FAILED" in result.stderr, result.stdout
     else:
         assert "backup written" in result.stdout, result.stderr
@@ -280,6 +297,226 @@ def test_a_heartbeat_that_cannot_be_written_does_not_fail_the_backup(
 
     assert dumps(out, env), "the dump itself must still land"
     assert "heartbeat not written" in result.stderr
+
+
+def test_once_runs_one_cycle_and_exits_0(tmp_path: Path, env: ProductSettings) -> None:
+    """The deployer's PRE_DEPLOY_HOOK runs `backup once`: the same dump, sidecar
+    and heartbeat as a scheduled cycle, then an exit instead of the sleep."""
+    beat = tmp_path / "heartbeat" / "last-success"
+    beat.parent.mkdir()
+
+    out, result = run_backup(tmp_path, env, args=("once",), BACKUP_HEARTBEAT=str(beat))
+
+    assert result.returncode == 0, result.stderr
+    found = dumps(out, env)
+    assert len(found) == 1
+    sidecar = Path(f"{found[0]}.hmac")
+    assert sidecar.read_text().strip() == hmac_via(BACKUP, found[0], env.values["BACKUP_HMAC_SALT"])
+    assert beat.exists()
+    assert not (tmp_path / "slept").exists(), "once must exit, not wait for the next cycle"
+
+
+def test_once_with_a_failed_dump_exits_non_zero(tmp_path: Path, env: ProductSettings) -> None:
+    """A failing PRE_DEPLOY_HOOK fails the deploy, so the failure must reach the exit status."""
+    out, result = run_backup(tmp_path, env, dump_fails=True, args=("once",))
+
+    assert result.returncode != 0
+    assert not dumps(out, env) and not dumps(out, env, ".hmac")
+    assert not (tmp_path / "slept").exists()
+
+
+def test_once_still_prunes_at_both_windows(tmp_path: Path, env: ProductSettings) -> None:
+    root = tmp_path / "backups"
+    prefix = env.values["BACKUP_PREFIX"]
+    past_window = aged_dump(root, 20, f"{prefix}-20260901-000000.sql.gz.enc")
+    inside = aged_dump(root, 5, f"{prefix}-20260916-000000.sql.gz.enc")
+
+    run_backup(tmp_path, env, args=("once",))
+
+    assert not past_window.exists()
+    assert inside.exists()
+
+
+def hold_lock(root: Path) -> subprocess.Popen:
+    """Another cycle holding the backup lock, as flock(1) would take it: in
+    run_backup's lock folder, the volume both runs mount."""
+    root.mkdir(exist_ok=True)
+    lock_dir = root.parent / "lock-volume"
+    lock_dir.mkdir(exist_ok=True)
+    code = (
+        "import fcntl, time\n"
+        f"f = open({str(lock_dir / 'backup.lock')!r}, 'a')\n"
+        "fcntl.flock(f, fcntl.LOCK_EX)\n"
+        "print('held', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+    return holder
+
+
+def test_the_lock_lives_on_its_own_volume_not_beside_the_dumps(tmp_path: Path, env: ProductSettings) -> None:
+    """The dumps sit on a host folder bind-mounted into the VM, where flock is
+    unproven; the lock sits on the backup-lock volume, at /lock by default."""
+    out, _result = run_backup(tmp_path, env, args=("once",))
+
+    assert (tmp_path / "lock-volume" / "backup.lock").is_file()
+    assert [p.name for p in out.iterdir() if "lock" in p.name] == []
+    assert 'LOCK_DIR="${BACKUP_LOCK_DIR:-/lock}"' in BACKUP.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("args", [(), ("once",)])
+def test_a_missing_lock_volume_is_refused_before_any_dump(
+    tmp_path: Path, env: ProductSettings, args: tuple[str, ...]
+) -> None:
+    """Refused, never moved: a lock anywhere else would not be shared."""
+    missing = tmp_path / "no-lock-volume"
+    out, result = run_backup(tmp_path, env, args=args, check=False, BACKUP_LOCK_DIR=str(missing))
+
+    assert result.returncode == 1
+    assert f"backup: {missing} missing or not writable (the cycle lock lives there)" in result.stderr
+    assert (
+        "add backup-lock:/lock to the backup service's volumes and declare backup-lock: under the top-level volumes"
+        in result.stderr
+    )
+    assert not dumps(out, env) and not dumps(out, env, ".hmac")
+    assert "backup written" not in result.stdout
+
+
+def test_once_waits_for_a_cycle_holding_the_lock(tmp_path: Path, env: ProductSettings) -> None:
+    """The scheduled service and a pre-deploy `once` share the directory; the
+    second waits for the first to finish instead of writing beside it."""
+    holder = hold_lock(tmp_path / "backups")
+    try:
+        # The first wait ends the other cycle; its lock goes with it, so a
+        # later try takes the lock. (Not kill -0: the holder stays a zombie
+        # until this test reaps it.)
+        fake(
+            tmp_path / "bin",
+            "sleep",
+            f'touch "{tmp_path / "waited"}"\nkill {holder.pid}\n/bin/sleep 0.1\n',
+        )
+        out, result = run_backup(tmp_path, env, args=("once",))
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "waited").exists(), "once ran without waiting for the lock"
+    assert len(dumps(out, env)) == 1
+
+
+def test_once_gives_up_after_the_bounded_wait(tmp_path: Path, env: ProductSettings) -> None:
+    """The .part of the cycle holding the lock is not swept, and the deploy hears the failure."""
+    root = tmp_path / "backups"
+    holder = hold_lock(root)
+    writing = root / f"{env.values['BACKUP_PREFIX']}-20260916-000000.sql.gz.enc.part"
+    writing.write_bytes(b"x")
+    try:
+        fake(tmp_path / "bin", "sleep", f'echo "$1" >>"{tmp_path / "waits"}"\n')
+        out, result = run_backup(tmp_path, env, args=("once",), check=False)
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert result.returncode != 0
+    assert "this cycle skipped" in result.stderr
+    assert (tmp_path / "waits").read_text().split() == ["5"] * 59, "60 tries, 5 s apart"
+    assert writing.exists(), "the sweep deleted the .part of the cycle holding the lock"
+    assert not dumps(out, env)
+
+
+def test_the_loop_skips_a_cycle_while_the_lock_is_held(tmp_path: Path, env: ProductSettings) -> None:
+    root = tmp_path / "backups"
+    holder = hold_lock(root)
+    writing = root / f"{env.values['BACKUP_PREFIX']}-20260916-000000.sql.gz.enc.part"
+    writing.write_bytes(b"x")
+    try:
+        # Lock waits return at once; the 6 h sleep ends the run.
+        fake(tmp_path / "bin", "sleep", '[ "$1" = 21600 ] && kill $PPID\nexit 0\n')
+        out, result = run_backup(tmp_path, env, check=False)
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert "this cycle skipped" in result.stderr
+    assert writing.exists(), "the loop's sweep ran without the lock"
+    assert not dumps(out, env)
+
+
+def test_without_an_argument_backup_keeps_looping(tmp_path: Path, env: ProductSettings) -> None:
+    """No argument is the long-lived service: after the first cycle it sleeps
+    (the fake sleep then ends the run) and clears stale .part files at start."""
+    root = tmp_path / "backups"
+    root.mkdir()
+    stale = root / f"{env.values['BACKUP_PREFIX']}-20260916-000000.sql.gz.enc.part"
+    stale.write_bytes(b"x")
+
+    out, _result = run_backup(tmp_path, env)
+
+    assert (tmp_path / "slept").exists()
+    assert not stale.exists()
+    assert len(dumps(out, env)) == 1
+
+
+@pytest.mark.parametrize("arg", ["twice", "--once", "ONCE"])
+def test_backup_refuses_any_other_argument(tmp_path: Path, env: ProductSettings, arg: str) -> None:
+    bin_dir = tmp_path / "bin"
+    fake(bin_dir, "pg_dump", f'touch "{tmp_path / "dumped"}"\n')
+    fake(bin_dir, "sleep", "kill $PPID\n")
+    result = subprocess.run(
+        ["bash", str(BACKUP), arg],
+        env={
+            **os.environ,
+            **env.values,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "BACKUP_PASSPHRASE": PASSPHRASE,
+            "BACKUP_ROOT": str(tmp_path / "backups"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert "usage: backup.sh [once]" in result.stderr
+    assert not (tmp_path / "dumped").exists()
+
+
+@pytest.mark.parametrize("args", [(), ("once",)])
+def test_backup_refuses_to_start_without_flock(
+    tmp_path: Path, env: ProductSettings, args: tuple[str, ...]
+) -> None:
+    """lock() cannot tell a missing flock from a busy lock, so without this
+    check every cycle would be skipped as held by another one."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Only what the script needs before the check, and pg_dump to prove no dump ran.
+    openssl = shutil.which("openssl")
+    assert openssl
+    (bin_dir / "openssl").symlink_to(openssl)
+    fake(bin_dir, "pg_dump", f'touch "{tmp_path / "dumped"}"\n')
+    bash = shutil.which("bash")
+    assert bash
+    result = subprocess.run(
+        [bash, str(BACKUP), *args],
+        env={
+            **env.values,
+            "PATH": str(bin_dir),
+            "BACKUP_PASSPHRASE": PASSPHRASE,
+            "BACKUP_ROOT": str(tmp_path / "backups"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert "flock is missing from this image" in result.stderr, result.stderr
+    assert not (tmp_path / "dumped").exists()
+    assert not (tmp_path / "backups").exists()
 
 
 def test_backup_and_restore_derive_the_same_mac(tmp_path: Path) -> None:

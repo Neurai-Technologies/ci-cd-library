@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- A template: install-autostart.sh fills in the double-underscore
+     placeholders from product.settings and writes the result to
+     ~/Library/LaunchAgents/LAUNCH_LABEL.backup-mirror.plist, when
+     BACKUP_MIRROR_DIR is set. -->
+<dict>
+    <key>Label</key>
+    <string>__MIRROR_LABEL__</string>
+
+    <!-- The installed copy beside the checked product.settings, never the
+         file in the working tree; see launchagent.plist.template. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__MIRROR_SCRIPT_PATH__</string>
+    </array>
+
+    <!-- Once a day at BACKUP_MIRROR_TIME, local time. A run missed while the
+         Mac slept runs when it wakes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>__MIRROR_HOUR__</integer>
+        <key>Minute</key>
+        <integer>__MIRROR_MINUTE__</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- See launchagent.plist.template for why these are not in /tmp. -->
+    <key>StandardOutPath</key>
+    <string>__MIRROR_LOG_BASE__.launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>__MIRROR_LOG_BASE__.launchd.err</string>
+</dict>
+</plist>

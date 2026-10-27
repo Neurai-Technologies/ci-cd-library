@@ -79,7 +79,9 @@ WORKER_SERVICE=jobs
 WORKER_READY_CMD="myproduct-worker --ready"
 # Optional executable, relative, run before anything is replaced (a database backup, say),
 # the sha as $1; its failure fails the deploy (empty: none). It runs again on every retry of a
-# failed deploy, so a backup hook must be idempotent and keep its own retention.
+# failed deploy, so a backup hook must be idempotent and keep its own retention. A hook can run
+# `docker compose -p <project> --project-directory <dir> run --rm -T backup once` for one backup
+# cycle with the same encryption, naming and retention as the scheduled ones (non-zero on failure).
 PRE_DEPLOY_HOOK=
 # Optional executable, relative, run after each successful compose up with the sha as $1 (empty: none).
 POST_DEPLOY_HOOK=deploy/post-deploy.sh
@@ -119,11 +121,24 @@ DATA_DISK_DEVICE=/dev/vdb1
 MAX_DUMP_AGE_HOURS=48
 # Host directory of the encrypted dumps. Default: ${REPO_DIR}/backups.
 BACKUP_DIR=/srv/myproduct/backups
+# Optional nightly copy of the dumps to a second disk (deploy/vm/backup-mirror.sh, installed by
+# install-autostart.sh). Empty: no mirror. Otherwise a folder inside BACKUP_MIRROR_VOLUME, never
+# BACKUP_DIR or inside it.
+BACKUP_MIRROR_DIR=
+# Mount point of the second disk. The mirror copies nothing (and alerts once a day) unless a volume
+# is mounted exactly here, so it never fills the system disk while the drive is absent.
+BACKUP_MIRROR_VOLUME=
+# Local time of the daily copy, HH:MM. Default: 03:00.
+BACKUP_MIRROR_TIME=03:00
+# Days the mirror keeps a copy. Default: BACKUP_KEEP_DAYS if set, else 14.
+BACKUP_MIRROR_KEEP_DAYS=
 # Compose service name of the deployer. Default: deployer.
 DEPLOYER_SERVICE=deployer
 # Compose profile the deployer runs under. Default: ops.
 OPS_PROFILE=ops
-# Database image the restore drill runs. Default: postgres:16.15-alpine.
+# Database image the restore drill runs and the backup image is built from: an exact version
+# tag of the database server's major (pg_dump refuses a newer server). Write the same value in
+# the compose file's backup and logarchive build args. Default: postgres:16.15-alpine.
 POSTGRES_IMAGE=postgres:16.15-alpine
 # Postgres init scripts the restore drill mounts, relative.
 POSTGRES_INIT_DIR=deploy/postgres-init

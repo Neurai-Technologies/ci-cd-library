@@ -270,7 +270,7 @@ def test_the_installer_checks_the_folder_before_installing_and_names_the_origin(
     assert text.index('for v in "$LAUNCH_LABEL" "$APP_SUPPORT_DIR" "$LOG_BASE"') < text.index(
         "s|__LAUNCH_LABEL__|"
     )
-    ok = [line for line in text.splitlines() if line.startswith('echo "ok: all three files match')]
+    ok = [line for line in text.splitlines() if line.startswith('echo "ok: all five files match')]
     assert len(ok) == 1 and "$ORIGIN_URL" in ok[0], ok
 
 
