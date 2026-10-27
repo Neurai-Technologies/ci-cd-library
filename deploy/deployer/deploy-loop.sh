@@ -40,10 +40,18 @@ set -euo pipefail
 : "${MIGRATE_CHECK_CMD:?MIGRATE_CHECK_CMD must be set (product.settings)}"
 : "${API_SERVICE:?API_SERVICE must be set (product.settings)}"
 : "${API_READY_CMD:?API_READY_CMD must be set (product.settings)}"
-: "${WORKER_SERVICE:?WORKER_SERVICE must be set (product.settings)}"
-: "${WORKER_READY_CMD:?WORKER_READY_CMD must be set (product.settings)}"
+# The worker readiness check is optional, but only as a pair: both set, or both empty.
+WORKER_SERVICE="${WORKER_SERVICE:-}"
+WORKER_READY_CMD="${WORKER_READY_CMD:-}"
+ready_cmds="MIGRATE_CHECK_CMD API_READY_CMD"
+if [ -n "$WORKER_SERVICE" ] && [ -n "$WORKER_READY_CMD" ]; then
+    ready_cmds="$ready_cmds WORKER_READY_CMD"
+elif [ -n "$WORKER_SERVICE" ] || [ -n "$WORKER_READY_CMD" ]; then
+    echo "WORKER_SERVICE and WORKER_READY_CMD must be set together, or both left empty (product.settings)" >&2
+    exit 1
+fi
 # A whitespace-only command would split into no words at all.
-for cmd in MIGRATE_CHECK_CMD API_READY_CMD WORKER_READY_CMD; do
+for cmd in $ready_cmds; do
     [ -n "${!cmd//[[:space:]]/}" ] || { echo "$cmd must not be blank (product.settings)" >&2; exit 1; }
 done
 REPO="$GITHUB_REPO"
@@ -558,9 +566,13 @@ deploy() {
     docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$API_SERVICE" \
         ${api_ready[@]+"${api_ready[@]}"} || return 1
     # The worker: WORKER_READY_CMD checks its own registration and dependencies.
-    FAILED_STEP="worker readiness"
-    docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$WORKER_SERVICE" \
-        ${worker_ready[@]+"${worker_ready[@]}"} || return 1
+    if [ -n "$WORKER_SERVICE" ]; then
+        FAILED_STEP="worker readiness"
+        docker compose -p "$COMPOSE_PROJECT" --project-directory "$COMPOSE_DIR_ABS" exec -T "$WORKER_SERVICE" \
+            ${worker_ready[@]+"${worker_ready[@]}"} || return 1
+    else
+        log "no worker readiness check configured"
+    fi
     # A marker that could not be written is a deploy not recorded: say so
     # once and retry next tick, rather than announcing the same deploy every
     # tick against a stale marker.

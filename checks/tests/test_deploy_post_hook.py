@@ -19,6 +19,7 @@ import pytest
 
 from conftest import LIBRARY_ROOT, ProductSettings
 from tests.shell import lift
+from tests.test_deploy_hardening import block
 
 LOOP = LIBRARY_ROOT / "deploy" / "deployer" / "deploy-loop.sh"
 SHA = "a" * 40
@@ -156,3 +157,39 @@ def test_the_readiness_commands_are_split_without_globbing(
     assert any(line.endswith("exec -T fakeapi fake-api --ready *") for line in calls), calls
     assert any(line.endswith("exec -T fakeworker fake-worker --ready *") for line in calls), calls
     assert not any("decoy-file" in line for line in calls), calls
+
+
+def test_no_worker_readiness_pair_skips_the_worker_check(
+    tmp_path: Path, product_settings: Callable[..., ProductSettings], src: Path
+) -> None:
+    result, state = deploy(tmp_path, product_settings, src, hook="", WORKER_SERVICE="", WORKER_READY_CMD="")
+    assert "DEPLOYED" in result.stdout, result.stdout + result.stderr
+    assert "no worker readiness check configured" in result.stdout
+    assert state.read_text().strip() == SHA
+    calls = (tmp_path / "docker-calls").read_text().splitlines()
+    assert any(" exec -T fakeapi " in line for line in calls), calls
+    assert not any("fakeworker" in line or "fake-worker" in line for line in calls), calls
+
+
+def worker_pair_check(service: str, command: str) -> subprocess.CompletedProcess:
+    code = (
+        "set -euo pipefail\n"
+        f"MIGRATE_CHECK_CMD=m; API_READY_CMD=a; WORKER_SERVICE={shlex.quote(service)}; "
+        f"WORKER_READY_CMD={shlex.quote(command)}\n"
+        + block(LOOP, 'WORKER_SERVICE="${WORKER_SERVICE:-}"', "done", ceiling=15)
+        + "echo STARTED\n"
+    )
+    return subprocess.run(["bash", "-c", code], capture_output=True, text=True, check=False)
+
+
+@pytest.mark.parametrize(("service", "command"), [("", ""), ("fakeworker", "fake-worker --ready")])
+def test_a_complete_or_empty_worker_pair_starts_the_loop(service: str, command: str) -> None:
+    result = worker_pair_check(service, command)
+    assert result.returncode == 0 and "STARTED" in result.stdout, result.stderr
+
+
+@pytest.mark.parametrize(("service", "command"), [("fakeworker", ""), ("", "fake-worker --ready")])
+def test_half_a_worker_pair_stops_the_loop(service: str, command: str) -> None:
+    result = worker_pair_check(service, command)
+    assert result.returncode != 0 and "STARTED" not in result.stdout
+    assert "WORKER_SERVICE and WORKER_READY_CMD must be set together" in result.stderr

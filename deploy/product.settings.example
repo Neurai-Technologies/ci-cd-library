@@ -64,7 +64,9 @@ MIGRATE_CHECK_CMD="myproduct-migrate --check"
 API_SERVICE=api
 # Command run in API_SERVICE; exits 0 only when the API is ready (split on spaces).
 API_READY_CMD="myproduct-api --ready"
-# Compose service of the background worker.
+# Optional, as a pair: compose service of the background worker. Leave both WORKER_SERVICE and
+# WORKER_READY_CMD empty for a product without a worker (the check is skipped); setting only one
+# stops the deployer at startup.
 WORKER_SERVICE=jobs
 # Command run in WORKER_SERVICE; exits 0 only when the worker is ready (split on spaces).
 WORKER_READY_CMD="myproduct-worker --ready"
