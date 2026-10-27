@@ -55,6 +55,7 @@ APP_IGNORE_PATHS="site docs *.md"
 # Optional git pathspecs (include list): when set, only changes under them can redeploy the stack.
 # Empty: the whole tree counts. Combines with APP_IGNORE_PATHS, which still excludes paths inside them.
 # When set, list the compose file's directory, product.settings and the hook paths too, or a change to them alone is not deployed.
+# A pathspec that matches no file at the commit under consideration fails the attempt with an alert; it is never counted as no app change.
 APP_PATHS=""
 # URL of the site's JSON release marker ({"sha": "<40-hex>"}) that the deployer watches.
 SITE_URL=https://www.example.com/_release.json

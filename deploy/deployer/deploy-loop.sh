@@ -598,11 +598,11 @@ app_changed() {
     #
     # Anything ambiguous - a first deploy, a missing object, a diff that
     # errors - counts as changed, so the failure direction is a harmless
-    # redeploy rather than a silent skip of a real one.
-    local current="$1" sha="$2" path ignore includes=() excludes=()
+    # redeploy rather than a silent skip of a real one. An APP_PATHS pathspec
+    # that matches nothing at the sha is the one exception: it answers 2, a
+    # failed attempt (see below).
+    local current="$1" sha="$2" path spec ignore includes=() excludes=()
     read -r -a includes <<<"${APP_PATHS:-}"
-    # An empty (or blank) APP_PATHS keeps the whole-tree diff.
-    [ "${#includes[@]}" -eq 0 ] && includes=(.)
     # read -a splits without globbing, so a pathspec such as *.md stays literal.
     read -r -a ignore <<<"$APP_IGNORE_PATHS"
     # The +-form keeps an empty list from being "unbound" under set -u on old bash.
@@ -612,7 +612,23 @@ app_changed() {
     [ -z "$current" ] && return 0
     git -C "$SRC" cat-file -e "${sha}^{commit}" 2>/dev/null \
         || git_authed -C "$SRC" fetch origin "$BRANCH" || return 0
+    # Every APP_PATHS pathspec must match a file in this sha's tree (the diff
+    # from the empty tree lists all of it). One that matches nothing - a typo,
+    # a folder renamed - would leave every diff empty and record every sha as
+    # "no app change", so the server would never redeploy and nothing would
+    # say so. It fails the attempt instead: alerted, not recorded, retried
+    # next tick. A git error fails the same way, and its message stays on
+    # the log.
+    for spec in ${includes[@]+"${includes[@]}"}; do
+        if [ -z "$(git -C "$SRC" diff --name-only "$EMPTY_TREE" "$sha" -- "$spec")" ]; then
+            log "APP_PATHS pathspec ${spec} matches no file at ${sha}"
+            FAILED_STEP="APP_PATHS"
+            return 2
+        fi
+    done
     git -C "$SRC" cat-file -e "${current}^{commit}" 2>/dev/null || return 0
+    # An empty (or blank) APP_PATHS keeps the whole-tree diff.
+    [ "${#includes[@]}" -eq 0 ] && includes=(.)
     if git -C "$SRC" diff --quiet "$current" "$sha" -- "${includes[@]}" ${excludes[@]+"${excludes[@]}"} 2>/dev/null; then
         return 1
     fi
@@ -637,6 +653,8 @@ if [ -n "$PRE_HOOK" ] && ! hook_path_ok "$PRE_HOOK"; then
 fi
 render_policy || { log "could not write ${SCRIPT_DIR}/ci-policy.json"; exit 1; }
 ensure_clone
+# The empty tree's id in this clone's hash (SHA-1 or SHA-256), for app_changed.
+EMPTY_TREE="$(git -C "$SRC" hash-object -t tree /dev/null)"
 log "watching ${REPO}@${BRANCH} every ${POLL}s"
 # A grace period that is not a number would make every site check's test
 # fail quietly; fall back to the default and say so.
@@ -652,11 +670,16 @@ while true; do
         current="$(cat "$STATE" 2>/dev/null || true)"
         if [ "$sha" != "$current" ]; then
             if ci_green "$sha"; then
-                if app_changed "$current" "$sha"; then
+                changed=0
+                app_changed "$current" "$sha" || changed=$?
+                if [ "$changed" -eq 0 ]; then
                     deploy "$sha" || {
                         log "deploy of ${sha} FAILED at ${FAILED_STEP} - will retry next tick"
                         notify_failure "$sha"
                     }
+                elif [ "$changed" -eq 2 ]; then
+                    log "deploy of ${sha} FAILED at ${FAILED_STEP} - will retry next tick"
+                    notify_failure "$sha"
                 else
                     log "sha ${sha} changes no app code - recording without redeploy"
                     if echo "$sha" 2>/dev/null >"$STATE"; then

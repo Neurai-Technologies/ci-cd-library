@@ -164,7 +164,9 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    keep its own retention. If `APP_PATHS` (the optional include list in
    `product.settings`: only changes under those paths redeploy the stack)
    is set, list the compose file's directory, `product.settings` and the
-   hook paths in it too, or a change to them alone is not deployed.
+   hook paths in it too, or a change to them alone is not deployed. A
+   pathspec in it that matches no file at the commit under consideration
+   fails the attempt with an alert; it is never counted as no app change.
 
    The deployer runs these hooks, the compose file and `product.settings`
    from its deploy-branch clone, with the docker socket and the `.env`
