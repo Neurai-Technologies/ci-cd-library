@@ -40,8 +40,11 @@ services:
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
       # Enforced whether or not the dump succeeded; see backup.sh's two prunes.
       BACKUP_MAX_DAYS: ${BACKUP_MAX_DAYS:-55}
-      # Pinned here, over anything product.settings (env_file) might say: the
-      # backup-lock mount below, so the service and `run backup once` share it.
+      # The container paths of the mounts below, pinned here over anything
+      # product.settings (env_file) might say; the lock so the service and
+      # `run backup once` share it.
+      BACKUP_ROOT: /backups
+      BACKUP_HEARTBEAT: /heartbeat/last-success
       BACKUP_LOCK_DIR: /lock
       # Optional off-site copy of every dump and sidecar to an S3 bucket
       # (Cloudflare R2). Unset, dumps stay on this host only.
@@ -101,6 +104,11 @@ services:
       BACKUP_R2_BUCKET: ${BACKUP_R2_BUCKET:-}
       BACKUP_R2_ACCESS_KEY_ID: ${BACKUP_R2_ACCESS_KEY_ID:-}
       BACKUP_R2_SECRET_ACCESS_KEY: ${BACKUP_R2_SECRET_ACCESS_KEY:-}
+      # The container paths of the mounts and tmpfs below, pinned here over
+      # anything product.settings (env_file) might say.
+      LOG_ARCHIVE_ROOT: /log-archive
+      LOG_ARCHIVE_STAGE: /stage
+      DOCKER_LOGS: /docker-logs
     volumes:
       # The directory, not the file: a single-file bind mount keeps the inode
       # it was started with, and the deployer's `git reset --hard` replaces
