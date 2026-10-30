@@ -1031,4 +1031,4 @@ def test_disposable_drill_drops_inherited_compose_selectors_before_docker(tmp_pa
     )
     assert result.returncode != 0
     assert seen.read_text().splitlines() == ["absent|absent|absent|1"] * 2
-    assert not (tmp_path / "report").exists(), "the daemon refusal must happen before a drill starts"
+    assert (tmp_path / "report").read_text().splitlines()[-1] == "FAIL: backup restore drill"

@@ -80,7 +80,7 @@ never copy a second maintained encryption implementation into a product.
 
 ## Disposable container drill
 
-From a normal terminal with Docker Compose, OpenSSL and Python available:
+From a sandboxed session with Docker Compose, Git, OpenSSL and Python available:
 
 ```sh
 DOCKER_HOST=unix:///path/to/disposable/docker.sock \
@@ -107,3 +107,9 @@ resources. It exposes no host ports and removes
 its resources on exit. Previously existing images are kept. It neither reads
 an existing database nor starts or stops a VM. The report records the results;
 a unit suite is not a substitute for this container drill.
+
+The daemon name is announced immediately. Other output is captured in a private
+file, published atomically to the supplied report and printed after cleanup.
+The report identifies the full source commit and ends in exactly
+`PASS: backup restore drill` or `FAIL: backup restore drill`, including preflight
+and cleanup failures. Logging uses regular files, without `/dev/fd` paths.

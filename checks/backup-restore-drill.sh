@@ -4,29 +4,10 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
 REPORT="${1:?usage: backup-restore-drill.sh REPORT_FILE HOST_BIND_ROOT}"
-HOST_BIND_ROOT="${2:?usage: backup-restore-drill.sh REPORT_FILE HOST_BIND_ROOT}"
-case "$HOST_BIND_ROOT" in /*) ;; *) echo 'REFUSED: host bind root must be absolute' >&2; exit 1 ;; esac
-[ -d "$HOST_BIND_ROOT" ] && [ ! -L "$HOST_BIND_ROOT" ] || { echo 'REFUSED: host bind root must be an existing plain directory' >&2; exit 1; }
-HOST_BIND_ROOT="$(cd "$HOST_BIND_ROOT" && pwd -P)"
-[ -n "$(find "$HOST_BIND_ROOT" -maxdepth 0 -type d -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
-    || { echo 'REFUSED: host bind root must be owned by this user and not writable by others' >&2; exit 1; }
-cd "$REPO"
-# Never inherit an operator's production Compose files, profiles or env files.
-while IFS= read -r setting; do unset "$setting"; done < <(compgen -v COMPOSE_ || :)
-export COMPOSE_DISABLE_ENV_FILE=1
-[ -n "${DOCKER_HOST:-}" ] || { echo 'REFUSED: set DOCKER_HOST explicitly to a disposable daemon' >&2; exit 1; }
-unset DOCKER_CONTEXT
-command -v docker >/dev/null
-command -v openssl >/dev/null
-command -v python3 >/dev/null
-docker compose version >/dev/null
-daemon_name=$(docker info --format '{{.Name}}' 2>/dev/null) || {
-    echo 'REFUSED: the selected Docker daemon is not running or reachable' >&2; exit 1;
-}
-[ -n "$daemon_name" ] || { echo 'REFUSED: the selected Docker daemon returned no name' >&2; exit 1; }
+case "$REPORT" in /*) ;; *) REPORT="$PWD/$REPORT" ;; esac
 umask 077
-exec > >(tee "$REPORT") 2>&1
-printf 'Docker daemon: %s\n' "$daemon_name"
+LOG_WORK=$(mktemp -d "${TMPDIR:-/tmp}/pipeline-drill-log.XXXXXX")
+LOG_FILE=$(mktemp "$(dirname "$REPORT")/.pipeline-drill-report.XXXXXX")
 WORK=""
 PROJECT=""
 IMAGE=""
@@ -45,11 +26,52 @@ cleanup() {
             status=1
         fi
     fi
-    [ -z "$WORK" ] || rm -rf "$WORK"
+    [ -z "$WORK" ] || rm -rf "$WORK" || status=1
+    rm -rf "$LOG_WORK" || status=1
+    if [ "$status" -eq 0 ]; then
+        printf 'PASS: backup restore drill\n'
+    else
+        printf 'FAIL: backup restore drill\n'
+    fi
+    if ! mv -f "$LOG_FILE" "$REPORT"; then
+        printf 'FAIL: backup restore drill\n' >&3
+        rm -f "$LOG_FILE" || :
+        exit 1
+    fi
+    cat "$REPORT" >&3 || status=1
     exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+exec 3>&1
+exec >"$LOG_FILE" 2>&1
+commit_sha=$(git -C "$REPO" rev-parse HEAD)
+case "$commit_sha" in *[!0-9a-f]*) echo 'REFUSED: invalid source commit'; exit 1 ;; esac
+[ "${#commit_sha}" -eq 40 ] || { echo 'REFUSED: invalid source commit'; exit 1; }
+printf 'Commit: %s\n' "$commit_sha"
+HOST_BIND_ROOT="${2:?usage: backup-restore-drill.sh REPORT_FILE HOST_BIND_ROOT}"
+case "$HOST_BIND_ROOT" in /*) ;; *) echo 'REFUSED: host bind root must be absolute' >&2; exit 1 ;; esac
+[ -d "$HOST_BIND_ROOT" ] && [ ! -L "$HOST_BIND_ROOT" ] || { echo 'REFUSED: host bind root must be an existing plain directory' >&2; exit 1; }
+HOST_BIND_ROOT="$(cd "$HOST_BIND_ROOT" && pwd -P)"
+[ -n "$(find "$HOST_BIND_ROOT" -maxdepth 0 -type d -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
+    || { echo 'REFUSED: host bind root must be owned by this user and not writable by others' >&2; exit 1; }
+cd "$REPO"
+# Never inherit an operator's production Compose files, profiles or env files.
+compgen -v COMPOSE_ >"$LOG_WORK/compose-selectors" || :
+while IFS= read -r setting; do unset "$setting"; done <"$LOG_WORK/compose-selectors"
+export COMPOSE_DISABLE_ENV_FILE=1
+[ -n "${DOCKER_HOST:-}" ] || { echo 'REFUSED: set DOCKER_HOST explicitly to a disposable daemon' >&2; exit 1; }
+unset DOCKER_CONTEXT
+command -v docker >/dev/null
+command -v openssl >/dev/null
+command -v python3 >/dev/null
+docker compose version >/dev/null
+daemon_name=$(docker info --format '{{.Name}}' 2>/dev/null) || {
+    echo 'REFUSED: the selected Docker daemon is not running or reachable' >&2; exit 1;
+}
+[ -n "$daemon_name" ] || { echo 'REFUSED: the selected Docker daemon returned no name' >&2; exit 1; }
+printf 'Docker daemon: %s\n' "$daemon_name"
+printf 'Docker daemon: %s\n' "$daemon_name" >&3
 export PIPELINE_DRILL_PASSPHRASE="disposable-fixture-$(date +%s)-$$"
 export PIPELINE_DRILL_PASSWORD=$(openssl rand -hex 20)
 export PIPELINE_DRILL_SALT=fakesalt
@@ -268,12 +290,12 @@ SETTINGS
     docker image rm "$IMAGE"
     rm -rf "$WORK"
     WORK="" PROJECT="" IMAGE=""
-    printf 'PASS: PostgreSQL %s backup/restore, tamper refusal and log archive\n' "$major"
+    printf 'Verified: PostgreSQL %s backup/restore, tamper refusal and log archive\n' "$major"
 }
 run_major 16 'postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea'
 run_major 17 'postgres:17.11-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b'
-if grep -Fq "$PIPELINE_DRILL_PASSPHRASE" "$REPORT" || \
-    grep -Fq "$PIPELINE_DRILL_PASSWORD" "$REPORT"; then
+if grep -Fq "$PIPELINE_DRILL_PASSPHRASE" "$LOG_FILE" || \
+    grep -Fq "$PIPELINE_DRILL_PASSWORD" "$LOG_FILE"; then
     echo 'FAIL: disposable secret appeared in drill output'; exit 1
 fi
-printf 'PASS: both supported PostgreSQL majors and generic log archives; resources removed\n'
+printf 'Verified: both supported PostgreSQL majors and generic log archives; resources removed\n'

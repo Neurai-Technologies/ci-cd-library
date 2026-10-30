@@ -9,7 +9,19 @@ from pathlib import Path
 import pytest
 
 from conftest import LIBRARY_ROOT
-from tests.shell import fake
+from tests.shell import fake, lift
+
+
+def assert_report(report: Path, output: str, success: bool) -> None:
+    """The saved evidence identifies the source and has one terminal result."""
+    sha = subprocess.check_output(["git", "-C", str(LIBRARY_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    lines = report.read_text().splitlines()
+    assert lines.count(f"Commit: {sha}") == 1
+    markers = [line for line in lines if line in ("PASS: backup restore drill", "FAIL: backup restore drill")]
+    assert markers == ["PASS: backup restore drill" if success else "FAIL: backup restore drill"]
+    assert lines[-1] == markers[0]
+    announcement = "".join(f"{line}\n" for line in lines if line.startswith("Docker daemon: "))
+    assert output == announcement + report.read_text()
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -48,6 +60,7 @@ esac
         assert "REFUSED: host bind sharing or hard links could not be confirmed" in result.stdout
         assert " up " not in calls.read_text()
     assert parent.exists() and not list(parent.iterdir()), "only the drill's own scratch may be removed"
+    assert_report(tmp_path / "report", result.stdout, False)
 
 
 @pytest.mark.parametrize("mode", ["missing", "empty", "down", "nameless", "ready"])
@@ -78,13 +91,41 @@ esac
     )
     assert result.returncode != 0, "the fixture refuses resource creation"
     if mode in ("missing", "empty"):
-        assert "REFUSED: set DOCKER_HOST explicitly" in result.stderr
+        assert "REFUSED: set DOCKER_HOST explicitly" in result.stdout
         assert not calls.exists(), "no Docker command may run before an endpoint is selected"
     elif mode in ("down", "nameless"):
-        assert "REFUSED:" in result.stderr
+        assert "REFUSED:" in result.stdout
         assert len(calls.read_text().splitlines()) == 2
-        assert not (tmp_path / "report").exists()
     else:
         assert "Docker daemon: fake-drill-daemon" in result.stdout
         assert all(line.startswith("unix:///fixture/docker.sock|absent|") for line in calls.read_text().splitlines())
         assert "info --format {{.Name}}" in calls.read_text().splitlines()[1]
+    assert_report(tmp_path / "report", result.stdout, False)
+
+
+@pytest.mark.parametrize("mode", ["success", "failure", "cleanup_failure"])
+def test_final_result_accounts_for_cleanup(tmp_path: Path, mode: str) -> None:
+    report = tmp_path / "report"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    sha = subprocess.check_output(["git", "-C", str(LIBRARY_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    fake(tmp_path / "bin", "docker", 'case " $* " in *" --format "*) printf wrong-owner ;; esac\n')
+    code = lift(LIBRARY_ROOT / "checks" / "backup-restore-drill.sh", "cleanup") + '''
+WORK="" PROJECT=fixture IMAGE=""
+[ "$TEST_MODE" != cleanup_failure ] || IMAGE=fixture-image
+LOG_FILE="$REPORT.pending"
+exec 3>&1
+exec >"$LOG_FILE" 2>&1
+printf 'Commit: %s\n' "$TEST_SHA"
+trap cleanup EXIT
+[ "$TEST_MODE" != failure ] || exit 7
+exit 0
+'''
+    result = subprocess.run(
+        ["bash", "-c", code],
+        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "TEST_MODE": mode,
+             "TEST_SHA": sha, "REPORT": str(report), "LOG_WORK": str(logs)},
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == (0 if mode == "success" else 7 if mode == "failure" else 1)
+    assert_report(report, result.stdout, mode == "success")
