@@ -366,6 +366,12 @@ with a host directory shared by the Docker VM; its bidirectional marker and
 hard-link probe must pass, followed by a real bind-mounted backup and restore.
 Named-volume-only evidence does not verify the host mount type.
 
+The shared crypto helper sets `umask 077`, so new dumps, log archives and their
+sidecars are `0600` (owner read/write), rather than the `0644` produced by an
+older wrapper using `umask 022`. Existing files are not changed. Confirm the
+restore, mirror and upload processes can read the owning user's files;
+a reader using another UID may lose access after adoption.
+
 The same installed mirror can also copy completed immutable archives. Set
 `BACKUP_MIRROR_EXTRA_SOURCES` in the product's checked `product.settings`;
 empty leaves the existing flat database-dump source unchanged. Each line is

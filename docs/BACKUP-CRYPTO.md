@@ -28,6 +28,12 @@ must be installed. Each function exits non-zero on refusal or failure.
   or decryption produces no plaintext. A source change after verification
   cannot change the snapshot being decrypted.
 
+The helper sets `umask 077`: new ciphertext and sidecars are owner-only
+(`0600`), and work directories are `0700`. Earlier wrappers running with
+`umask 022` could produce `0644` files. This permissions change does not alter
+existing files, but restore, mirror and upload readers must have access as the
+owning user; verify the consumer's reader identities before adopting it.
+
 Protect the output directory and temporary storage from other writers. The
 functions use private mode-700 work directories and remove them on normal
 exit and handled signals. SIGKILL or a power loss cannot run cleanup: the
