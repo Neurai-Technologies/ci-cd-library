@@ -181,7 +181,8 @@ fi
 
 # A container killed mid-archive leaves a partial file behind (and, under a
 # test, a staging directory); clear both once, at start.
-rm -rf "${STAGE}"/stage-* "${ROOT}"/*.writing "${ROOT}"/*.writing.hmac
+# Crypto leftovers share .writing's startup-only cleanup and accepted once overlap.
+rm -rf "${STAGE}"/stage-* "${ROOT}"/*.writing "${ROOT}"/*.writing.hmac "${ROOT}"/.backup-crypto.*
 while true; do
     # The retention window, applied whatever tonight's archive does: an
     # archive that fails must not keep old ones alive past their day.

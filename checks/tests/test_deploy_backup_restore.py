@@ -410,6 +410,9 @@ def test_once_gives_up_after_the_bounded_wait(tmp_path: Path, env: ProductSettin
     holder = hold_lock(root)
     writing = root / f"{env.values['BACKUP_PREFIX']}-20260916-000000.sql.gz.enc.part"
     writing.write_bytes(b"x")
+    crypto_work = root / ".backup-crypto.active"
+    crypto_work.mkdir()
+    (crypto_work / "ciphertext").write_bytes(b"active ciphertext")
     try:
         fake(tmp_path / "bin", "sleep", f'echo "$1" >>"{tmp_path / "waits"}"\n')
         out, result = run_backup(tmp_path, env, args=("once",), check=False)
@@ -421,6 +424,7 @@ def test_once_gives_up_after_the_bounded_wait(tmp_path: Path, env: ProductSettin
     assert "this cycle skipped" in result.stderr
     assert (tmp_path / "waits").read_text().split() == ["5"] * 59, "60 tries, 5 s apart"
     assert writing.exists(), "the sweep deleted the .part of the cycle holding the lock"
+    assert (crypto_work / "ciphertext").read_bytes() == b"active ciphertext"
     assert not dumps(out, env)
 
 
@@ -455,6 +459,22 @@ def test_without_an_argument_backup_keeps_looping(tmp_path: Path, env: ProductSe
     assert (tmp_path / "slept").exists()
     assert not stale.exists()
     assert len(dumps(out, env)) == 1
+
+
+@pytest.mark.parametrize("args", [(), ("once",)])
+def test_locked_backup_sweep_removes_abandoned_crypto_work(
+    tmp_path: Path, env: ProductSettings, args: tuple[str, ...]
+) -> None:
+    root = tmp_path / "backups"
+    stale = root / ".backup-crypto.abandoned"
+    stale.mkdir(parents=True)
+    (stale / "ciphertext").write_bytes(b"interrupted ciphertext")
+    unrelated = root / "keep"
+    unrelated.mkdir()
+    (unrelated / "ciphertext").write_bytes(b"keep")
+    run_backup(tmp_path, env, args=args)
+    assert not stale.exists()
+    assert (unrelated / "ciphertext").read_bytes() == b"keep"
 
 
 @pytest.mark.parametrize("arg", ["twice", "--once", "ONCE"])

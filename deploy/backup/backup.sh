@@ -155,6 +155,7 @@ cycle() {
     # A container killed mid-write leaves a .part behind. Under the lock, so
     # no .part here belongs to a running cycle.
     find "$ROOT" \( -name '*.part' -o -name '*.part.hmac' \) -delete
+    rm -rf "$ROOT"/.backup-crypto.*
     # The ceiling, before the dump is attempted and whatever it does. Retention
     # used to live entirely in the success branch below, so a database too
     # broken to dump was also a database whose old dumps stopped expiring - and
