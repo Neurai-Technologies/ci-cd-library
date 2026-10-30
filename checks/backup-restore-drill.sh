@@ -3,7 +3,13 @@
 # Uses the selected Docker daemon; creates only uniquely named drill resources.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
-REPORT="${1:?usage: backup-restore-drill.sh REPORT_FILE}"
+REPORT="${1:?usage: backup-restore-drill.sh REPORT_FILE HOST_BIND_ROOT}"
+HOST_BIND_ROOT="${2:?usage: backup-restore-drill.sh REPORT_FILE HOST_BIND_ROOT}"
+case "$HOST_BIND_ROOT" in /*) ;; *) echo 'REFUSED: host bind root must be absolute' >&2; exit 1 ;; esac
+[ -d "$HOST_BIND_ROOT" ] && [ ! -L "$HOST_BIND_ROOT" ] || { echo 'REFUSED: host bind root must be an existing plain directory' >&2; exit 1; }
+HOST_BIND_ROOT="$(cd "$HOST_BIND_ROOT" && pwd -P)"
+[ -n "$(find "$HOST_BIND_ROOT" -maxdepth 0 -type d -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
+    || { echo 'REFUSED: host bind root must be owned by this user and not writable by others' >&2; exit 1; }
 cd "$REPO"
 # Never inherit an operator's production Compose files, profiles or env files.
 while IFS= read -r setting; do unset "$setting"; done < <(compgen -v COMPOSE_ || :)
@@ -43,7 +49,7 @@ export PIPELINE_DRILL_PASSWORD=$(openssl rand -hex 20)
 export PIPELINE_DRILL_SALT=fakesalt
 run_major() {
     local major=$1 postgres=$2 cipher source_counts restored_counts
-    WORK=$(mktemp -d "${TMPDIR:-/tmp}/pipeline-backup-drill.XXXXXX")
+    WORK=$(mktemp -d "$HOST_BIND_ROOT/pipeline-backup-drill.XXXXXX")
     local nonce
     nonce=$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')
     PROJECT="pipeline-drill-${major}-$$-${nonce}"
@@ -73,6 +79,9 @@ run_major() {
     IMAGE="$candidate"
     case "$PROJECT" in pipeline-drill-*) ;; *) exit 1 ;; esac
     mkdir -p "$WORK/build/scripts" "$WORK/build/logs/fixture" "$WORK/copies" "$WORK/archive"
+    export PIPELINE_DRILL_HOST_BACKUPS="$WORK/host-backups"
+    mkdir "$PIPELINE_DRILL_HOST_BACKUPS"
+    printf '%s\n' "$nonce" > "$PIPELINE_DRILL_HOST_BACKUPS/.host-marker"
     cp "$REPO/deploy/backup/backup.sh" "$REPO/deploy/backup/logarchive.sh" \
         "$REPO/deploy/backup/crypto.sh" "$WORK/build/scripts/"
     printf '{"Name":"/fakestack-api-1"}\n' > "$WORK/build/logs/fixture/config.v2.json"
@@ -137,6 +146,11 @@ services:
     security_opt: [no-new-privileges:true]
     volumes:
       - backups:/backups
+      - type: bind
+        source: ${PIPELINE_DRILL_HOST_BACKUPS:?}
+        target: /host-backups
+        bind:
+          create_host_path: false
       - heartbeat:/heartbeat
       - lock:/lock
     tmpfs: [/tmp]
@@ -160,6 +174,18 @@ volumes:
   archives:
 YAML
     local -a C=(docker compose --env-file /dev/null -f "$WORK/compose.yml" -p "$PROJECT")
+    if ! "${C[@]}" run --rm -T --no-deps --entrypoint /bin/sh \
+        -e "PIPELINE_DRILL_BIND_PROBE=$nonce" backup -c '
+        test "$(cat /host-backups/.host-marker)" = "$PIPELINE_DRILL_BIND_PROBE" &&
+        printf "%s\n" "$PIPELINE_DRILL_BIND_PROBE" > /host-backups/.container-marker &&
+        ln /host-backups/.container-marker /host-backups/.container-marker-link'; then
+        echo 'REFUSED: host bind sharing or hard links could not be confirmed'; exit 1
+    fi
+    if [ "$(cat "$PIPELINE_DRILL_HOST_BACKUPS/.container-marker" 2>/dev/null)" != "$nonce" ] \
+        || [ ! "$PIPELINE_DRILL_HOST_BACKUPS/.container-marker" -ef "$PIPELINE_DRILL_HOST_BACKUPS/.container-marker-link" ]; then
+        echo 'REFUSED: host bind sharing or hard links could not be confirmed'; exit 1
+    fi
+    printf 'Host bind sharing and hard links verified: %s\n' "$PIPELINE_DRILL_HOST_BACKUPS"
     "${C[@]}" up -d --wait source restored
     for service in source restored; do
         printf "CREATE ROLE fakereader LOGIN PASSWORD '%s';\n" "$PIPELINE_DRILL_PASSWORD" \
@@ -180,6 +206,11 @@ SQL
     "${C[@]}" run --rm -T --entrypoint /bin/sh backup \
         -c 'tar -C /backups -cf - .' | tar -xf - -C "$WORK/copies"
     cipher=$(find "$WORK/copies" -name 'fakedump-*.sql.gz.enc' -type f)
+    [ -n "$cipher" ] && [ -f "$cipher.hmac" ]
+    BACKUP_PASSPHRASE="$PIPELINE_DRILL_PASSPHRASE" BACKUP_HMAC_SALT=fakesalt \
+        bash -c '. "$1"; backup_verify "$2"' fixture "$REPO/deploy/backup/crypto.sh" "$cipher"
+    "${C[@]}" run --rm -T -e BACKUP_ROOT=/host-backups backup once
+    cipher=$(find "$PIPELINE_DRILL_HOST_BACKUPS" -name 'fakedump-*.sql.gz.enc' -type f)
     [ -n "$cipher" ] && [ -f "$cipher.hmac" ]
     cp "$cipher" "$WORK/damaged.enc"
     cp "$cipher.hmac" "$WORK/damaged.enc.hmac"

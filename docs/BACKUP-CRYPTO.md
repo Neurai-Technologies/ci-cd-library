@@ -77,7 +77,7 @@ never copy a second maintained encryption implementation into a product.
 From a normal terminal with Docker Compose, OpenSSL and Python available:
 
 ```sh
-bash checks/backup-restore-drill.sh /tmp/backup-drill-report.log
+bash checks/backup-restore-drill.sh /tmp/backup-drill-report.log /srv/drill-shared
 ```
 
 This builds the actual backup Dockerfile with the shared helper and wrappers,
@@ -86,6 +86,13 @@ For each major it restores the real dump through `deploy/restore.sh`, compares
 table counts, ordered-row checksums and a sequence, refuses a tampered dump
 before any SQL is applied, and decrypts a real log archive. Only synthetic
 fixtures are used. Builds may download the pinned images and Alpine packages.
+The second argument is an existing, user-owned host directory shared with the
+Docker VM and not writable by other users. Each run creates its own private
+child there, prints the bind folder, and proves bidirectional host/container
+visibility and hard links before starting the databases. It writes backups
+into both a named volume and that host bind, then restores the bind-mounted
+backup. A missing share or unsupported hard link fails the drill. Only its
+own scratch child is removed; the supplied parent is preserved.
 It creates uniquely named containers, volumes, networks and a temporary image
 on the currently selected Docker daemon; it exposes no host ports and removes
 its resources on exit. Previously existing images are kept. It neither reads

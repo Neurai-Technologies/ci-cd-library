@@ -358,6 +358,14 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
 
 ## Additional encrypted mirror families
 
+Backup and log-archive storage, including host bind mounts, must support POSIX
+hard links and file permissions. The mirror destination must support them too:
+encrypted pairs are published with hard links and private modes. FAT/exFAT
+storage is unsuitable. Before adopting, run the disposable container drill
+with a host directory shared by the Docker VM; its bidirectional marker and
+hard-link probe must pass, followed by a real bind-mounted backup and restore.
+Named-volume-only evidence does not verify the host mount type.
+
 The same installed mirror can also copy completed immutable archives. Set
 `BACKUP_MIRROR_EXTRA_SOURCES` in the product's checked `product.settings`;
 empty leaves the existing flat database-dump source unchanged. Each line is
