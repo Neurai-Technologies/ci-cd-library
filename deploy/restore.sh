@@ -64,17 +64,24 @@ echo "restoring into compose project: ${PROJECT}" >&2
 # The shared helper verifies before releasing plaintext. Only this wrapper
 # retains the explicit legacy opt-in for dumps predating authenticated sidecars.
 . "$(dirname "$0")/backup/crypto.sh"
-if [ ! -f "${file}.hmac" ] && [ "${RESTORE_UNVERIFIED:-0}" != 1 ]; then
-    echo "REFUSED: ${file}.hmac is missing. Dumps written before the sidecar existed have none; set RESTORE_UNVERIFIED=1 to restore one anyway." >&2
-    exit 1
+verified=1
+if [ ! -f "${file}.hmac" ]; then
+    if [ "${RESTORE_UNVERIFIED:-0}" != 1 ]; then
+        echo "REFUSED: ${file}.hmac is missing. Dumps written before the sidecar existed have none; set RESTORE_UNVERIFIED=1 to restore one anyway." >&2
+        exit 1
+    fi
+    verified=0
 fi
 
 # 2. Decrypt and decompress to a private temp file, then check it is a whole dump.
 umask 077
 plain=$(mktemp "${TMPDIR:-/tmp}/${PRODUCT}-restore.XXXXXX")
 trap 'rm -f "$plain" || :' EXIT
-if [ -f "${file}.hmac" ]; then
-    backup_decrypt "$file" | gunzip >"$plain"
+if [ "$verified" = 1 ]; then
+    if ! backup_decrypt "$file" | gunzip >"$plain"; then
+        echo "REFUSED: dump authentication or decryption failed" >&2
+        exit 1
+    fi
 else
     openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE -in "$file" | gunzip >"$plain"
 fi

@@ -633,6 +633,7 @@ def test_restore_refuses_a_dump_sealed_under_another_salt(tmp_path: Path, produc
     reading = product_settings(BACKUP_HMAC_SALT="restorsl")
     result, received = restore(tmp_path, reading, dumps(out, reading)[0])
     assert result.returncode == 1 and "does not match its .hmac sidecar" in result.stderr
+    assert "REFUSED:" in result.stderr
     assert not received.exists()
 
 
@@ -645,6 +646,7 @@ def test_restore_refuses_a_modified_dump_before_decrypting(
     dump.write_bytes(data)
     result, received = restore(tmp_path, env, dump)
     assert result.returncode == 1 and "does not match its .hmac sidecar" in result.stderr
+    assert "REFUSED:" in result.stderr
     assert not received.exists()
 
 
@@ -653,6 +655,7 @@ def test_restore_refuses_a_wrong_passphrase_before_decrypting(
 ) -> None:
     result, received = restore(tmp_path, env, dumps(backup_dir, env)[0], BACKUP_PASSPHRASE="not it")
     assert result.returncode == 1 and "wrong passphrase" in result.stderr
+    assert "REFUSED:" in result.stderr
     assert not received.exists()
 
 
@@ -667,6 +670,21 @@ def test_restore_refuses_a_dump_without_a_sidecar_unless_told(
     result, received = restore(tmp_path, env, dump, RESTORE_UNVERIFIED="1")
     assert result.returncode == 0, result.stderr
     assert received.read_text() == FAKE_DUMP
+
+
+def test_restore_cannot_fall_back_when_a_checked_sidecar_disappears(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings
+) -> None:
+    dump = dumps(backup_dir, env)[0]
+    shim = tmp_path / "shim"
+    mktemp = shutil.which("mktemp")
+    assert mktemp
+    # This is after the initial sidecar check, before the old second check.
+    fake(shim, "mktemp", f'rm -f {shlex.quote(str(dump) + ".hmac")}\nexec {shlex.quote(mktemp)} "$@"\n')
+    result, received = restore(tmp_path, env, dump, path_prefix=str(shim), RESTORE_UNVERIFIED="0")
+    assert result.returncode == 1 and "REFUSED:" in result.stderr
+    assert not received.exists(), "a disappearing sidecar silently selected unverified decryption"
+    assert not plaintext_left(tmp_path, env)
 
 
 def test_restore_refuses_a_truncated_dump(tmp_path: Path, env: ProductSettings) -> None:
