@@ -20,7 +20,7 @@ import yaml
 
 from conftest import LIBRARY_ROOT, ProductSettings
 from tests.shell import fake
-from tests.test_deploy_backup_restore import BACKUP, PASSPHRASE, functions, hmac_via
+from tests.test_deploy_backup_restore import BACKUP, PASSPHRASE, hmac_via
 
 ARCHIVE = BACKUP.parent / "logarchive.sh"
 DEPLOY_LOOP = LIBRARY_ROOT / "deploy" / "deployer" / "deploy-loop.sh"
@@ -133,8 +133,11 @@ def decrypted_listing(archive: Path) -> list[str]:
 
 
 def test_the_archive_derives_its_mac_key_exactly_as_the_backup_does() -> None:
-    names = ("mac_key", "hmac_of")
-    assert functions(ARCHIVE, names) == functions(BACKUP, names)
+    for script in (ARCHIVE, BACKUP):
+        text = script.read_text(encoding="utf-8")
+        assert '. "$(dirname "$0")/crypto.sh"' in text
+        assert "backup_encrypt" in text
+        assert "mac_key()" not in text
 
 
 def test_the_archive_refuses_to_start_without_a_project(tmp_path: Path, env: ProductSettings) -> None:

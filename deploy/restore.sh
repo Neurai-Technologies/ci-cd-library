@@ -61,33 +61,10 @@ PROJECT="${RESTORE_PROJECT:-$COMPOSE_PROJECT}"
 # on the drill path. One line of output buys the same certainty.
 echo "restoring into compose project: ${PROJECT}" >&2
 
-# Same derivation as backup.sh (a test pins the two together): the MAC key is
-# the passphrase under its own fixed salt, so the encryption key is never reused.
-mac_key() {
-    # PBKDF2 at openssl's default 10,000 rounds under a fixed, label-only salt
-    # (BACKUP_HMAC_SALT, hex-encoded for -S), so guessing the passphrase from a sidecar costs as much as
-    # guessing it from the ciphertext. -P prints the derived key, nothing is
-    # encrypted, and the passphrase still travels by env, never argv.
-    openssl enc -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE -S "$(printf '%s' "$BACKUP_HMAC_SALT" | od -An -tx1 | tr -d ' \n')" -P | sed -n 's/^key=//p'
-}
-hmac_of() {
-    openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(mac_key)" -r "$1" | cut -c1-64
-}
-
-# 1. Integrity, before the file is even decrypted.
-if [ -f "${file}.hmac" ]; then
-    # A failed or empty derivation is a refusal in its own words, never a
-    # value that could equal an empty sidecar.
-    computed=$(hmac_of "$file") || computed=""
-    [ ${#computed} -eq 64 ] || {
-        echo "REFUSED: could not derive the MAC key from BACKUP_PASSPHRASE (openssl?)" >&2
-        exit 1
-    }
-    [ "$computed" = "$(tr -d '[:space:]' <"${file}.hmac")" ] || {
-        echo "REFUSED: ${file} does not match its .hmac sidecar (modified, truncated, or wrong passphrase)" >&2
-        exit 1
-    }
-elif [ "${RESTORE_UNVERIFIED:-0}" != "1" ]; then
+# The shared helper verifies before releasing plaintext. Only this wrapper
+# retains the explicit legacy opt-in for dumps predating authenticated sidecars.
+. "$(dirname "$0")/backup/crypto.sh"
+if [ ! -f "${file}.hmac" ] && [ "${RESTORE_UNVERIFIED:-0}" != 1 ]; then
     echo "REFUSED: ${file}.hmac is missing. Dumps written before the sidecar existed have none; set RESTORE_UNVERIFIED=1 to restore one anyway." >&2
     exit 1
 fi
@@ -96,7 +73,11 @@ fi
 umask 077
 plain=$(mktemp "${TMPDIR:-/tmp}/${PRODUCT}-restore.XXXXXX")
 trap 'rm -f "$plain" || :' EXIT
-openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE -in "$file" | gunzip >"$plain"
+if [ -f "${file}.hmac" ]; then
+    backup_decrypt "$file" | gunzip >"$plain"
+else
+    openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE -in "$file" | gunzip >"$plain"
+fi
 head -10 "$plain" | grep -q '^-- PostgreSQL database dump$' || {
     echo "REFUSED: decrypted file does not start like a pg_dump" >&2
     exit 1

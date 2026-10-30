@@ -27,6 +27,7 @@ from tests.shell import fake, lift
 
 BACKUP = LIBRARY_ROOT / "deploy" / "backup" / "backup.sh"
 RESTORE = LIBRARY_ROOT / "deploy" / "restore.sh"
+CRYPTO = BACKUP.with_name("crypto.sh")
 PASSPHRASE = "correct horse battery staple"
 # The erasure query the tests configure, and what the fake docker answers it
 # with, so a test can assert the value reached the warning rather than that
@@ -46,12 +47,9 @@ FAKE_DUMP = (
 )
 
 
-def functions(script: Path, names: tuple[str, ...]) -> str:
-    return "\n".join(lift(script, name) for name in names)
-
-
 def hmac_via(script: Path, path: Path, salt: str) -> str:
-    code = f"{functions(script, ('mac_key', 'hmac_of'))}\nhmac_of {shlex.quote(str(path))}"
+    assert "crypto.sh" in script.read_text(encoding="utf-8")
+    code = f'. {shlex.quote(str(CRYPTO))}\n_backup_crypto_hmac {shlex.quote(str(path))}'
     return subprocess.check_output(
         ["bash", "-c", code],
         text=True,
@@ -184,12 +182,12 @@ def restore(
     # heredoc through `cat`, so a cat that refuses is exactly that failure,
     # and it reaches nothing else: the fake docker above calls /bin/cat.
     if break_notice:
-        fake(bin_dir, "cat", "exit 1\n")
+        fake(bin_dir, "cat", '[ "$#" -ne 0 ] || exit 1\nexec /bin/cat "$@"\n')
     # An unlink that fails - a read-only or full filesystem, which is the
     # condition a restore runs under. rm -f returns 0 for a MISSING file, so
     # only a stub reproduces the case the guards exist for.
     if break_cleanup:
-        fake(bin_dir, "rm", "exit 1\n")
+        fake(bin_dir, "rm", 'case " $* " in *"-restore."*) exit 1 ;; esac\nexec /bin/rm "$@"\n')
     # fd 1 closed. The completion echo is the script's only stdout write, so
     # this fails exactly that one command and nothing else.
     streams: dict[str, object] = (
@@ -583,7 +581,9 @@ def test_every_script_requires_the_salt_and_derives_its_hex_the_same_way() -> No
         assert not any(line.startswith("BACKUP_HMAC_SALT=") for line in code), (
             f"{script.name} assigns the salt"
         )
-        assert lift(script, "mac_key").count(derivation) == 1, f"{script.name} derives the -S hex differently"
+        assert "crypto.sh" in text
+        assert "mac_key()" not in text
+    assert lift(CRYPTO, "_backup_crypto_hmac").count(derivation) == 1
 
 
 def test_backup_writes_a_dump_with_a_matching_sidecar(backup_dir: Path, env: ProductSettings) -> None:
@@ -653,9 +653,9 @@ def test_restore_refuses_a_truncated_dump(tmp_path: Path, env: ProductSettings) 
     truncated = FAKE_DUMP.split("-- PostgreSQL database dump complete")[0]
     dump = tmp_path / f"{env.values['BACKUP_PREFIX']}-truncated.sql.gz.enc"
     code = (
-        f"{functions(BACKUP, ('mac_key', 'hmac_of'))}\n"
+        f'. {shlex.quote(str(CRYPTO))}\n'
         f"printf '%s' \"$FAKE_DUMP\" | gzip | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASSPHRASE -out {dump}\n"
-        f"hmac_of {dump} >{dump}.hmac"
+        f"_backup_crypto_hmac {dump} >{dump}.hmac"
     )
     subprocess.run(
         ["bash", "-c", code],
@@ -682,7 +682,7 @@ def test_restore_refuses_when_the_mac_key_cannot_be_derived(
 ) -> None:
     """An openssl that prints nothing for the key must not let an empty sidecar through."""
     dump = dumps(backup_dir, env)[0]
-    Path(f"{dump}.hmac").write_bytes(b"")
+    Path(f"{dump}.hmac").write_text("0" * 64 + "\n")
     shim_dir = tmp_path / "shim"
     fake(
         shim_dir, "openssl", f'case " $* " in *" -P "*) exit 0 ;; esac\nexec {shutil.which("openssl")} "$@"\n'
@@ -947,3 +947,50 @@ def test_a_restore_without_product_settings_refuses_before_anything(
     )
     assert result.returncode != 0
     assert "PRODUCT_SETTINGS" in result.stderr, result.stderr
+
+
+def test_restore_runs_from_the_packaged_layout_with_its_shared_helper(
+    tmp_path: Path, backup_dir: Path, env: ProductSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packaged = tmp_path / "installed" / "restore.sh"
+    packaged.parent.mkdir()
+    (packaged.parent / "backup").mkdir()
+    shutil.copy(RESTORE, packaged)
+    shutil.copy(CRYPTO, packaged.parent / "backup" / "crypto.sh")
+    monkeypatch.setattr(sys.modules[__name__], "RESTORE", packaged)
+    result, received = restore(tmp_path, env, dumps(backup_dir, env)[0])
+    assert result.returncode == 0, result.stderr
+    assert received.read_text() == FAKE_DUMP
+
+
+def test_disposable_drill_packages_the_helper_and_both_major_images() -> None:
+    drill = (LIBRARY_ROOT / "checks" / "backup-restore-drill.sh").read_text()
+    assert '"$REPO/deploy/backup/crypto.sh"' in drill
+    assert 'cp "$REPO/deploy/backup/Dockerfile"' in drill
+    assert "COPY scripts/ /scripts/" in drill
+    assert "run_major 16 'postgres:16.15-alpine@sha256:" in drill
+    assert "run_major 17 'postgres:17.11-alpine@sha256:" in drill
+    assert 'bash "$REPO/deploy/restore.sh" "$cipher"' in drill
+    assert '"$source_counts" = "$restored_counts"' in drill
+    assert "compgen -v COMPOSE_" in drill
+    assert "export COMPOSE_DISABLE_ENV_FILE=1" in drill
+    assert drill.count('COMPOSE_FILE="$WORK/compose.yml" COMPOSE_ENV_FILES=/dev/null') == 2
+    assert "for kind in container network volume" in drill
+    assert drill.count('RESTORE_PROJECT="$PROJECT" RESTORE_SERVICE=restored RESTORE_UNVERIFIED=0') == 2
+    assert '"${PROJECT}_default" "${PROJECT}_backups"' in drill
+    assert "--remove-orphans" not in drill
+    parsed = subprocess.run(["bash", "-n", str(LIBRARY_ROOT / "checks" / "backup-restore-drill.sh")], capture_output=True, check=False)
+    assert parsed.returncode == 0
+
+
+def test_disposable_drill_drops_inherited_compose_selectors_before_docker(tmp_path: Path) -> None:
+    seen = tmp_path / "seen"
+    fake(tmp_path / "bin", "docker", f'printf "%s|%s|%s|%s\\n" "${{COMPOSE_FILE-absent}}" "${{COMPOSE_ENV_FILES-absent}}" "${{COMPOSE_PROFILES-absent}}" "${{COMPOSE_DISABLE_ENV_FILE-absent}}" >>"{seen}"\n[ "$1" != info ]\n')
+    result = subprocess.run(
+        ["bash", str(LIBRARY_ROOT / "checks" / "backup-restore-drill.sh"), str(tmp_path / "report")],
+        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "COMPOSE_FILE": "refuse-production.yml", "COMPOSE_ENV_FILES": "refuse-production-config", "COMPOSE_PROFILES": "refuse-production-profile"},
+        capture_output=True, check=False,
+    )
+    assert result.returncode != 0
+    assert seen.read_text().splitlines() == ["absent|absent|absent|1"] * 2
+    assert not (tmp_path / "report").exists(), "the daemon refusal must happen before a drill starts"

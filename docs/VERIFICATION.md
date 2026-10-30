@@ -178,3 +178,28 @@ paragraphs; keep history.
     unwritable heartbeat folder, the nightly host mirror, off-site upload,
     retention pruning, the log archiver, and amd64. The bind-mounted
     directories lived inside the VM, not on a host disk.
+
+### Shared crypto verification
+
+- 2026-10-30, `codex/backup-crypto-mirror`, uncommitted crypto unit:
+  baseline `just ci` passed 575 checks; after the shared API, consumer and
+  packaging changes it passed 605 checks. Both used the existing check-suite
+  environment; the default shell Python lacked pytest. No tools were installed.
+  The optional product-name list was absent and the sandbox could not write
+  pytest's cache; those warnings do not establish product-specific scanning.
+- The 25 direct crypto regressions cover independent old-format fixtures,
+  old-algorithm decryption of new output, bad configuration and sidecars,
+  changed/truncated ciphertext, wrong passphrase/salt, withholding plaintext,
+  private snapshots, existing outputs and handled signals at both publication
+  steps. A valid MAC over undecryptable ciphertext emits no plaintext.
+- Independent security review found a signal window after ciphertext
+  publication; inode-aware cleanup fixed it. The rerun proved that handled
+  interruption leaves neither member of the pair and does not delete a
+  competing writer's output. Review also tightened the operator drill's
+  Compose/restore environment isolation and resource collision checks.
+- Container restore evidence remains outstanding in this environment: the
+  default Docker socket was unavailable, and no other daemon or VM was
+  selected or changed. `checks/backup-restore-drill.sh` is the operator gate
+  for actual PostgreSQL 16/17 and generic archive round-trips; its packaging
+  and environment isolation are checked locally, which is not a container
+  or restore result. No real credentials, database or archive was used.

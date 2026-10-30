@@ -73,20 +73,7 @@ if [ "$MAX_DAYS" -lt "$KEEP_DAYS" ]; then
     echo "BACKUP_MAX_DAYS ($MAX_DAYS) is below BACKUP_KEEP_DAYS ($KEEP_DAYS); dumps will be deleted at the lower figure" >&2
 fi
 
-# Encrypt-then-MAC. aes-256-cbc keeps a dump confidential but not tamper-
-# evident, so each dump gets a .hmac sidecar over the ciphertext, keyed from
-# the passphrase under its own salt. restore.sh derives the key the same way
-# and refuses a file that does not match before decrypting anything.
-mac_key() {
-    # PBKDF2 at openssl's default 10,000 rounds under a fixed, label-only salt
-    # (BACKUP_HMAC_SALT, hex-encoded for -S exactly as restore.sh does), so guessing the passphrase from a sidecar costs as much as
-    # guessing it from the ciphertext. -P prints the derived key, nothing is
-    # encrypted, and the passphrase still travels by env, never argv.
-    openssl enc -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE -S "$(printf '%s' "$BACKUP_HMAC_SALT" | od -An -tx1 | tr -d ' \n')" -P | sed -n 's/^key=//p'
-}
-hmac_of() {
-    openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(mac_key)" -r "$1" | cut -c1-64
-}
+. "$(dirname "$0")/crypto.sh"
 
 # Off-site copy: every dump and its sidecar are also PUT to an S3 bucket
 # (Cloudflare R2) when BACKUP_R2_ENDPOINT is set. curl signs the request
@@ -167,7 +154,7 @@ cycle() {
     result=ok
     # A container killed mid-write leaves a .part behind. Under the lock, so
     # no .part here belongs to a running cycle.
-    find "$ROOT" -name '*.part' -delete
+    find "$ROOT" \( -name '*.part' -o -name '*.part.hmac' \) -delete
     # The ceiling, before the dump is attempted and whatever it does. Retention
     # used to live entirely in the success branch below, so a database too
     # broken to dump was also a database whose old dumps stopped expiring - and
@@ -185,9 +172,9 @@ cycle() {
     # credential, so compromising it yields SELECT, not write/DDL.
     if pg_dump -h "$DB_SERVICE" -U "$DB_BACKUP_USER" "$DB_NAME" \
         | gzip \
-        | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASSPHRASE -out "$tmp" \
+        | backup_encrypt "$tmp" \
         && [ "$(wc -c <"$tmp")" -gt 1024 ] \
-        && hmac_of "$tmp" >"${out}.hmac"; then
+        && mv "$tmp.hmac" "${out}.hmac"; then
         mv "$tmp" "$out"
         echo "backup written: $out ($(wc -c <"$out") bytes)"
         # The dump is safe on disk at this point; a heartbeat that cannot be
@@ -200,7 +187,7 @@ cycle() {
         # operator.
         find "$ROOT" -name "${BACKUP_PREFIX}-*.sql.gz.enc*" -mtime +"$KEEP_DAYS" -delete
     else
-        rm -f "$tmp" "${out}.hmac"
+        rm -f "$tmp" "$tmp.hmac" "${out}.hmac"
         echo "backup FAILED at ${ts}" >&2
         result=failed
     fi
