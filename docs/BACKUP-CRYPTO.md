@@ -83,7 +83,8 @@ never copy a second maintained encryption implementation into a product.
 From a normal terminal with Docker Compose, OpenSSL and Python available:
 
 ```sh
-bash checks/backup-restore-drill.sh /tmp/backup-drill-report.log /srv/drill-shared
+DOCKER_HOST=unix:///path/to/disposable/docker.sock \
+  bash checks/backup-restore-drill.sh /tmp/backup-drill-report.log /srv/drill-shared
 ```
 
 This builds the actual backup Dockerfile with the shared helper and wrappers,
@@ -100,7 +101,9 @@ into both a named volume and that host bind, then restores the bind-mounted
 backup. A missing share or unsupported hard link fails the drill. Only its
 own scratch child is removed; the supplied parent is preserved.
 It creates uniquely named containers, volumes, networks and a temporary image
-on the currently selected Docker daemon; it exposes no host ports and removes
+on the explicitly selected Docker daemon; it refuses an absent `DOCKER_HOST`,
+clears `DOCKER_CONTEXT`, and prints the daemon's name before creating drill
+resources. It exposes no host ports and removes
 its resources on exit. Previously existing images are kept. It neither reads
 an existing database nor starts or stops a VM. The report records the results;
 a unit suite is not a substitute for this container drill.

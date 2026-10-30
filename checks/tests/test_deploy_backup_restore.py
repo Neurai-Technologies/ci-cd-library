@@ -1026,7 +1026,7 @@ def test_disposable_drill_drops_inherited_compose_selectors_before_docker(tmp_pa
     fake(tmp_path / "bin", "docker", f'printf "%s|%s|%s|%s\\n" "${{COMPOSE_FILE-absent}}" "${{COMPOSE_ENV_FILES-absent}}" "${{COMPOSE_PROFILES-absent}}" "${{COMPOSE_DISABLE_ENV_FILE-absent}}" >>"{seen}"\n[ "$1" != info ]\n')
     result = subprocess.run(
         ["bash", str(LIBRARY_ROOT / "checks" / "backup-restore-drill.sh"), str(tmp_path / "report"), str(tmp_path)],
-        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "COMPOSE_FILE": "refuse-production.yml", "COMPOSE_ENV_FILES": "refuse-production-config", "COMPOSE_PROFILES": "refuse-production-profile"},
+        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "DOCKER_HOST": "unix:///fixture/docker.sock", "COMPOSE_FILE": "refuse-production.yml", "COMPOSE_ENV_FILES": "refuse-production-config", "COMPOSE_PROFILES": "refuse-production-profile"},
         capture_output=True, check=False,
     )
     assert result.returncode != 0

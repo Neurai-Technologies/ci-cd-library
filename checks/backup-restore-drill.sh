@@ -14,13 +14,19 @@ cd "$REPO"
 # Never inherit an operator's production Compose files, profiles or env files.
 while IFS= read -r setting; do unset "$setting"; done < <(compgen -v COMPOSE_ || :)
 export COMPOSE_DISABLE_ENV_FILE=1
+[ -n "${DOCKER_HOST:-}" ] || { echo 'REFUSED: set DOCKER_HOST explicitly to a disposable daemon' >&2; exit 1; }
+unset DOCKER_CONTEXT
 command -v docker >/dev/null
 command -v openssl >/dev/null
 command -v python3 >/dev/null
 docker compose version >/dev/null
-docker info >/dev/null
+daemon_name=$(docker info --format '{{.Name}}' 2>/dev/null) || {
+    echo 'REFUSED: the selected Docker daemon is not running or reachable' >&2; exit 1;
+}
+[ -n "$daemon_name" ] || { echo 'REFUSED: the selected Docker daemon returned no name' >&2; exit 1; }
 umask 077
 exec > >(tee "$REPORT") 2>&1
+printf 'Docker daemon: %s\n' "$daemon_name"
 WORK=""
 PROJECT=""
 IMAGE=""
