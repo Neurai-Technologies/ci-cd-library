@@ -66,6 +66,10 @@ OpenSSL `-macopt` argument. Never enable shell tracing around secret handling;
 the public functions turn tracing off inside their subshells.
 
 Compression, SQL headers/trailers and archive validation belong to callers.
+Authenticated restores through `deploy/restore.sh` refuse a symlinked dump or
+`.hmac` sidecar before any SQL is applied: both must be plain files. Older
+wrappers could follow these links; the shared authentication helper now fails
+closed instead.
 Only `deploy/restore.sh` retains the historical explicit `RESTORE_UNVERIFIED=1`
 opt-in for a dump without a sidecar. The shared API has no authentication bypass.
 
