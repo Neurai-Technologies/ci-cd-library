@@ -61,6 +61,7 @@ FAKE = {
     # The archive's own project is the stack's unless a product says otherwise.
     "LOG_ARCHIVE_PROJECT": "fakestack",
     "POSTGRES_INIT_DIR": "deploy/fake-init",
+    "BACKUP_MIRROR_EXTRA_SOURCES": "",
 }
 PATHS = {
     "SRC_DIR": "src",

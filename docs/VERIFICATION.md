@@ -203,3 +203,22 @@ paragraphs; keep history.
   for actual PostgreSQL 16/17 and generic archive round-trips; its packaging
   and environment isolation are checked locally, which is not a container
   or restore result. No real credentials, database or archive was used.
+
+### Explicit mirror sources verification
+
+- 2026-10-30, `codex/backup-crypto-mirror`, uncommitted mirror unit after
+  `ce38109`: `just ci` passed 632 checks. The original and extra-source
+  mirror suites passed 69 checks, then an independent reviewer reran all
+  69 successfully. Source scripts, installed-copy fixtures and the existing
+  LaunchAgent/settings contract are covered; no second job was added.
+- Cases include two sources with duplicate basenames, spaces, absent mounts,
+  missing folders/sidecars, namespace collisions, canonical ancestry,
+  symlinks, user ownership/modes, interrupted publication, differing bytes
+  at the same size, truncated existing copies, family-only retention and
+  a single failure-to-recovery transition. Existing corrupt immutable copies
+  now fail visibly rather than being silently skipped or overwritten.
+- Independent security review approved the copy/path/cleanup/state changes
+  with no remaining findings. The same optional-name-list and pytest-cache
+  warnings noted above remain. Real mounted-disk copying, LaunchAgent loading,
+  provider alerts and the container restore drill remain operator checks;
+  local fixtures are not evidence of those external operations.

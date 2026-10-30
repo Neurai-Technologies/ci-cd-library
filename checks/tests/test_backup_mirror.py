@@ -141,9 +141,10 @@ def test_a_copy_the_mirror_has_is_never_replaced(host: Host) -> None:
     dump(host.src, f"{DUMP}.hmac", size=65)
     kept = dump(host.mirror, DUMP, size=100).read_bytes()
 
-    assert host.run().returncode == 0, host.log
+    assert host.run().returncode != 0, host.log
     assert (host.mirror / DUMP).read_bytes() == kept
-    assert "copied 1 files" in host.log
+    assert "differs from its immutable source" in host.log
+    assert not (host.mirror / f"{DUMP}.hmac").exists()
 
 
 def test_the_prune_takes_only_old_dump_copies(host: Host) -> None:

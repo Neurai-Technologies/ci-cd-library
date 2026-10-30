@@ -128,6 +128,14 @@ BACKUP_MIRROR_DIR=
 # Mount point of the second disk. The mirror copies nothing (and alerts once a day) unless a volume
 # is mounted exactly here, so it never fills the system disk while the drive is absent.
 BACKUP_MIRROR_VOLUME=
+# Optional extra completed archive families, one record per line, inside double quotes:
+# namespace|absolute source folder|file prefix|suffix
+# Namespace: unique lowercase letters/digits/_/-. Prefix: letters/digits/_/-.
+# Suffix: sql.gz.enc or tar.gz.enc. Only prefix-YYYYMMDD-HHMMSS.suffix + .hmac
+# is copied, flat (never a cache or arbitrary recursive files), into mirror/namespace.
+# Empty preserves the single flat database-dump source. Example record:
+# documents|/srv/myproduct/archives|snapshot|tar.gz.enc
+BACKUP_MIRROR_EXTRA_SOURCES=
 # Local time of the daily copy, HH:MM. Default: 03:00.
 BACKUP_MIRROR_TIME=03:00
 # Days the mirror keeps a copy. Default: BACKUP_KEEP_DAYS if set, else 14.

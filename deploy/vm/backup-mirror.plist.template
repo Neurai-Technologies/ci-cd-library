@@ -18,7 +18,8 @@
     </array>
 
     <!-- Once a day at BACKUP_MIRROR_TIME, local time. A run missed while the
-         Mac slept runs when it wakes. -->
+         Mac slept runs when it wakes. The same process reads any explicit
+         BACKUP_MIRROR_EXTRA_SOURCES from its installed product.settings. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>

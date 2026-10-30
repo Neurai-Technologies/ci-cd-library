@@ -272,13 +272,14 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
    `<LAUNCH_LABEL>.backup-mirror`. It copies the encrypted dumps and their
    `.hmac` sidecars from `BACKUP_DIR` to a second disk once a day at
    `BACKUP_MIRROR_TIME` (local time; a run missed while the Mac slept runs
-   on wake), and nothing else: no `.part`, no lock file, no log archives.
+   on wake). By default it copies no `.part`, lock file or log archive;
+   explicit extra families are described below.
    - `BACKUP_MIRROR_VOLUME` is the second disk's mount point and
      `BACKUP_MIRROR_DIR` a folder inside it, never `BACKUP_DIR` or inside
      it. With no volume mounted exactly there, the run copies nothing,
      alerts once a day ("backup mirror: destination not mounted") and
      exits 0, so a missing drive never fills the system disk.
-   - A copy is never replaced, is checked by size, and each dump is
+   - A copy is never replaced, is checked by size and bytes, and each dump is
      copied with its sidecar (sidecar first) or the run fails. Symlinks in
      `BACKUP_DIR` are never copied. Copies older than `BACKUP_MIRROR_KEEP_DAYS`
      (default `BACKUP_KEEP_DAYS`, else 14) are pruned by the dump names
@@ -354,3 +355,47 @@ SHA differs, stop: the tag does not exist or is not the release you meant.
 - `.env` and every secret, outside Git.
 - The product's own tests, its caller workflows, its hooks and its restore
   rehearsal record.
+
+## Additional encrypted mirror families
+
+The same installed mirror can also copy completed immutable archives. Set
+`BACKUP_MIRROR_EXTRA_SOURCES` in the product's checked `product.settings`;
+empty leaves the existing flat database-dump source unchanged. Each line is
+`namespace|absolute source folder|prefix|suffix`, inside a double-quoted value.
+Namespaces are unique lowercase letters, digits, `_` or `-`; prefixes allow
+letters, digits, `_` and `-`. The suffix is `sql.gz.enc` or `tar.gz.enc`.
+
+```sh
+BACKUP_MIRROR_EXTRA_SOURCES="documents|/srv/myproduct/archives|snapshot|tar.gz.enc
+logs|/srv/myproduct/log-archive|logs|tar.gz.enc"
+```
+
+Only `prefix-YYYYMMDD-HHMMSS.suffix` and its `.hmac` sidecar are copied from
+that folder, without recursion, into `BACKUP_MIRROR_DIR/namespace`. These are
+digit-shaped UTC names; the mirror does not interpret calendar dates. Caches,
+partial files and other names are excluded. Keep each source an immutable
+completed-artifact directory, not its producer's working cache. A missing
+source, duplicate namespace or source/destination overlap fails the run.
+
+The existing installer copies the complete checked settings file; no second
+LaunchAgent, process, heartbeat, token file or alert channel is created.
+The extra setting requires the mirror to be enabled. Reinstall through the
+normal verified installer when changing its installed settings or script.
+All sources and destination folders must belong to the current user and must
+not be group/world writable. Copies are mode 600. Symlink artifacts and
+namespace aliases are refused, and canonical ancestry checks cover every
+source against the entire destination tree.
+
+Existing copies are never overwritten. Each copied file is compared by bytes,
+not only size, including a file already present at the destination. A changed
+or truncated copy fails with an alert, requiring operator investigation.
+The mirror does not have the encryption key and does not authenticate the
+MAC: it verifies that ciphertext and sidecar bytes match their immutable
+source. Decryption still requires the shared crypto API's MAC verification.
+
+Sidecars are published before ciphertext, with incomplete-pair cleanup on
+handled interruption. Retention uses the shared mirror window independently
+for each configured family and never descends into nested directories. One
+heartbeat is written only after every family succeeds; failure and first
+recovery use the existing channel. An unmounted second disk still writes no
+artifact data. Existing database-dump glob names remain supported unchanged.
