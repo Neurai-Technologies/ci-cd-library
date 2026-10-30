@@ -145,6 +145,43 @@ def test_corrupt_existing_copy_fails_without_overwriting(tmp_path: Path, damage:
     assert len(host.alerts) == 1 and "differs" in host.alerts[0]
 
 
+@pytest.mark.parametrize("component", ["", ".hmac"])
+def test_mismatched_pairs_do_not_block_later_dumps_or_families(tmp_path: Path, component: str) -> None:
+    host, source = configured(tmp_path)
+    second = tmp_path / "reports"
+    second.mkdir()
+    host.settings(BACKUP_MIRROR_EXTRA_SOURCES=f"documents|{source}|snapshot|tar.gz.enc\nreports|{second}|snapshot|tar.gz.enc")
+    pair(host.src)
+    pair(source, ARCHIVE)
+    pair(second, ARCHIVE)
+    assert host.run().returncode == 0, host.log
+    heartbeat = host.app / "backup-mirror.last-success"
+    heartbeat.write_text("previous-success\n")
+    bad = [host.mirror / (DUMP + component), host.mirror / "documents" / (ARCHIVE + component)]
+    for path in bad:
+        path.write_bytes(b"mismatched immutable copy")
+    newer_dump = "fakedump-20261031-030000.sql.gz.enc"
+    newer_archive = "snapshot-20261031-020000.tar.gz.enc"
+    pair(host.src, newer_dump)
+    pair(source, newer_archive)
+    pair(second, newer_archive)
+
+    assert host.run().returncode != 0
+    assert all(path.read_bytes() == b"mismatched immutable copy" for path in bad)
+    for folder, namespace, name in [(host.src, "", newer_dump), (source, "documents", newer_archive), (second, "reports", newer_archive)]:
+        for suffix in ("", ".hmac"):
+            assert (host.mirror / namespace / (name + suffix)).read_bytes() == (folder / (name + suffix)).read_bytes()
+    assert len(host.alerts) == 2 and all("pair skipped" in alert for alert in host.alerts)
+    assert heartbeat.read_text() == "previous-success\n"
+    assert (host.app / "backup-mirror.failed").exists()
+    for path, original in zip(bad, [host.src / (DUMP + component), source / (ARCHIVE + component)], strict=True):
+        path.write_bytes(original.read_bytes())
+    assert host.run().returncode == 0, host.log
+    assert host.run().returncode == 0, host.log
+    assert len(host.alerts) == 3 and "recovered" in host.alerts[-1]
+    assert not (host.app / "backup-mirror.failed").exists()
+
+
 def test_missing_sidecar_never_publishes_an_extra_bundle(tmp_path: Path) -> None:
     host, source = configured(tmp_path)
     pair(source, ARCHIVE)

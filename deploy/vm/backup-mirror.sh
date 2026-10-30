@@ -68,9 +68,13 @@ alert() {
         || echo "alert delivery failed"
 }
 
-fail() {
+note_failure() {
     alert "${PRODUCT} backup mirror FAILED: $*"
     touch "$FAILED_MARK" 2>/dev/null || echo "could not write $FAILED_MARK"
+}
+
+fail() {
+    note_failure "$*"
     exit 1
 }
 
@@ -212,6 +216,7 @@ for target in "${TARGETS[@]}"; do
 done
 
 copied=0
+pair_failures=0
 PAIR=""
 PAIR_COMPLETE=0
 cleanup() {
@@ -226,7 +231,7 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 copy_one() {
-    local from="$1" target="$2" name to
+    local from="$1" target="$2" name to compare_status
     name="$(basename "$from")"
     to="$target/$name"
     [ -f "$from" ] && [ ! -L "$from" ] || fail "$name was not a plain file when copied"
@@ -236,8 +241,15 @@ copy_one() {
         [ -f "$to" ] && [ ! -L "$to" ] || fail "$name in the mirror is not a plain file"
         [ -n "$(find "$to" -maxdepth 0 -type f -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
             || fail "$name in the mirror is not owned privately by this user"
-        cmp -s "$from" "$to" || fail "existing mirror copy of $name differs from its immutable source"
-        return 0
+        if cmp -s "$from" "$to"; then
+            return 0
+        else
+            compare_status=$?
+            [ "$compare_status" -eq 1 ] || fail "could not compare existing mirror copy of $name"
+            note_failure "existing mirror copy of $name differs from its immutable source; pair skipped"
+            pair_failures=$((pair_failures + 1))
+            return 1
+        fi
     fi
     [ ! -e "$to.mirroring" ] && [ ! -L "$to.mirroring" ] || fail "unfinished copy path is not clear: $name"
     cp -pP "$from" "$to.mirroring" || fail "could not copy $name"
@@ -253,7 +265,7 @@ copy_one() {
 }
 
 mirror_family() {
-    local source="$1" target="$2" pattern="$3" f name
+    local source="$1" target="$2" pattern="$3" f name pair_start
     find "$target" -maxdepth 1 -type f \
         \( -name "$pattern.mirroring" -o -name "$pattern.hmac.mirroring" \) -delete \
         || fail "could not clear unfinished copies in $target"
@@ -264,8 +276,13 @@ mirror_family() {
         [ -f "$f.hmac" ] && [ ! -L "$f.hmac" ] || fail "$name has no .hmac sidecar to copy with it"
         PAIR="$target/$name"
         PAIR_COMPLETE=0
-        copy_one "$f.hmac" "$target"
-        copy_one "$f" "$target"
+        pair_start=$copied
+        if ! copy_one "$f.hmac" "$target" || ! copy_one "$f" "$target"; then
+            cleanup
+            PAIR=""
+            copied=$pair_start
+            continue
+        fi
         cmp -s "$f.hmac" "$PAIR.hmac" && cmp -s "$f" "$PAIR" \
             || fail "$name changed while its pair was being copied"
         PAIR_COMPLETE=1
@@ -282,6 +299,10 @@ for ((i=1; i<${#SOURCES[@]}; i++)); do
     mirror_family "${REAL_SOURCES[$i]}" "${TARGETS[$i]}" "${PATTERNS[$i]}"
 done
 echo "copied $copied files to $MIRROR"
+if [ "$pair_failures" -gt 0 ]; then
+    echo "$pair_failures mismatched pairs skipped; mirror run incomplete"
+    exit 1
+fi
 
 # 5. Success: a heartbeat, and an alert only when the last run had failed.
 date -u +%Y-%m-%dT%H:%M:%SZ >"$HEARTBEAT" 2>/dev/null || echo "heartbeat not written: $HEARTBEAT"

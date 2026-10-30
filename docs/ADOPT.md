@@ -403,6 +403,10 @@ source against the entire destination tree.
 Existing copies are never overwritten. Each copied file is compared by bytes,
 not only size, including a file already present at the destination. A changed
 or truncated copy fails with an alert, requiring operator investigation.
+An existing mismatched pair is left untouched and skipped; later dumps and
+families still run. The overall run exits non-zero, keeps its failed marker
+and does not update the success heartbeat or send recovery until all pairs
+pass on a subsequent run. Other safety and publication errors still stop it.
 The mirror does not have the encryption key and does not authenticate the
 MAC: it verifies that ciphertext and sidecar bytes match their immutable
 source. Decryption still requires the shared crypto API's MAC verification.
