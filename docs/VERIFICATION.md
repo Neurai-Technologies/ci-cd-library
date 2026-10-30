@@ -1,5 +1,19 @@
 # Verification
 
+## Multiline settings parsing
+
+- 2026-10-30, the unchanged settings format from cde8a37: Docker Compose 5.1.3
+  `config --format json` loaded a synthetic `product.settings` via a fixture
+  service's `env_file`. A double-quoted `BACKUP_MIRROR_EXTRA_SOURCES` containing
+  two records, separated by one literal newline, retained both that newline
+  and spaces in the source paths. The parsed service environment matched the
+  expected string exactly (one equality assertion passed). The command used
+  a new empty Docker configuration, cleared inherited Compose selectors and
+  disabled implicit environment files with `--env-file /dev/null` and
+  `COMPOSE_DISABLE_ENV_FILE=1`. No daemon connection, image pull, container or
+  real settings file was involved. No format change was required. This parser
+  check does not prove the subsequent Docker VM bind-mount or restore drill.
+
 ## Baseline
 
 Run from the repository root:
