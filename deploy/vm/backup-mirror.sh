@@ -10,10 +10,11 @@
 # stop (exit 0, one alert a day) when the second disk is not mounted, so
 # nothing is ever written onto the system disk in its place; copy the dumps
 # and sidecars the mirror lacks, never replacing one it has; check each copy's
-# size and that every copied dump has its .hmac beside it; prune copies older
+# bytes and that every copied dump has its .hmac beside it; prune copies older
 # than BACKUP_MIRROR_KEEP_DAYS, matching the dump names only; write a
 # heartbeat. Alerts go on failure and on recovery, never on success. The
-# dumps are encrypted already; this adds no encryption of its own.
+# dumps are encrypted already; this adds no encryption of its own. Optional
+# explicit archive families use the same run and isolated destination folders.
 set -eu
 # The log, heartbeat and state files are the operator's alone; nothing else
 # reads them. Copies keep their source's mode (cp -p).
@@ -67,9 +68,13 @@ alert() {
         || echo "alert delivery failed"
 }
 
-fail() {
+note_failure() {
     alert "${PRODUCT} backup mirror FAILED: $*"
     touch "$FAILED_MARK" 2>/dev/null || echo "could not write $FAILED_MARK"
+}
+
+fail() {
+    note_failure "$*"
     exit 1
 }
 
@@ -111,6 +116,35 @@ case "$KEEP_DAYS" in
     '' | *[!0-9]*) fail "BACKUP_MIRROR_KEEP_DAYS must be a whole number of days (got $KEEP_DAYS)" ;;
 esac
 
+# Additional explicit archive families share this process, alert state and disk.
+# Each record is namespace|absolute source|prefix|suffix. Namespaces are flat,
+# lowercase and unique; extra families use fixed UTC-shaped timestamp names.
+SOURCES=("$SRC")
+NAMESPACES=("")
+PATTERNS=("${BACKUP_PREFIX}-*.sql.gz.enc")
+while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    separators="${record//[^|]/}"
+    [ "${#separators}" -eq 3 ] || fail "extra mirror source must have exactly four pipe-separated fields"
+    IFS='|' read -r namespace source prefix suffix <<<"$record"
+    case "$namespace" in
+        ''|*[!a-z0-9_-]*) fail "extra mirror namespace must use lowercase letters, digits, _ and -" ;;
+    esac
+    case "$prefix" in
+        ''|*[!A-Za-z0-9_-]*) fail "extra mirror prefix may hold only letters, digits, _ and -" ;;
+    esac
+    case "$suffix" in sql.gz.enc|tar.gz.enc) ;; *) fail "extra mirror suffix must be sql.gz.enc or tar.gz.enc" ;; esac
+    case "$source" in /*) ;; *) fail "extra mirror source must be an absolute path" ;; esac
+    case "$source" in /|*/..|*/../*|*/.|*/./*) fail "extra mirror source must not be / or contain . or .. parts" ;; esac
+    [ -d "$source" ] || fail "extra mirror source ($source) is not a directory"
+    for used in "${NAMESPACES[@]}"; do
+        [ "$used" != "$namespace" ] || fail "duplicate extra mirror namespace: $namespace"
+    done
+    SOURCES+=("$source")
+    NAMESPACES+=("$namespace")
+    PATTERNS+=("${prefix}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].${suffix}")
+done <<<"${BACKUP_MIRROR_EXTRA_SOURCES:-}"
+
 # 2. The second disk must be mounted at BACKUP_MIRROR_VOLUME. A directory test
 #    is not enough: with the disk absent, its mount point can still exist as a
 #    plain folder on the system disk, and a copy would fill that instead.
@@ -131,7 +165,14 @@ fi
 # first of the nearest folder that exists, before anything is created, then
 # of the mirror itself.
 REAL_VOLUME="$(cd "$VOLUME" && pwd -P)" || fail "could not resolve $VOLUME"
-REAL_SRC="$(cd "$SRC" && pwd -P)" || fail "could not resolve $SRC"
+REAL_SOURCES=()
+for source in "${SOURCES[@]}"; do
+    resolved="$(cd "$source" && pwd -P)" || fail "could not resolve $source"
+    [ -n "$(find "$resolved" -maxdepth 0 -type d -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
+        || fail "$source must be owned by this user and not writable by other users"
+    REAL_SOURCES+=("$resolved")
+done
+REAL_SRC="${REAL_SOURCES[0]}"
 d="$MIRROR"
 while [ ! -e "$d" ] && [ ! -L "$d" ]; do d="$(dirname "$d")"; done
 real="$(cd "$d" && pwd -P)" || fail "could not resolve $d"
@@ -139,6 +180,12 @@ case "$real" in
     "$REAL_VOLUME" | "$REAL_VOLUME"/*) ;;
     *) fail "BACKUP_MIRROR_DIR ($MIRROR) resolves outside BACKUP_MIRROR_VOLUME ($real)" ;;
 esac
+# Check every source against the proposed real destination before creating it.
+proposed="$real${MIRROR#"$d"}"
+for source in "${REAL_SOURCES[@]}"; do
+    case "$proposed" in "$source"|"$source"/*) fail "mirror destination resolves to a source or inside it" ;; esac
+    case "$source" in "$proposed"/*) fail "a mirror source resolves inside the destination" ;; esac
+done
 mkdir -p "$MIRROR" || fail "could not create $MIRROR"
 REAL_MIRROR="$(cd "$MIRROR" && pwd -P)" || fail "could not resolve $MIRROR"
 case "$REAL_MIRROR" in
@@ -153,50 +200,109 @@ case "$REAL_SRC" in
 esac
 MIRROR="$REAL_MIRROR"
 
-# 3. Copy what the mirror lacks. Only the dump names: never a .part, the
-#    backup lock or anything else in BACKUP_DIR. Each copy is written under a
-#    name no dump pattern matches and renamed once its size checks out; a run
-#    killed half way leaves one, cleared here first.
-find "$MIRROR" -maxdepth 1 -type f -name "${BACKUP_PREFIX}-*.mirroring" -delete \
-    || fail "could not clear unfinished copies in $MIRROR"
+# 3. Validate all namespaces before copying or pruning any family. A namespace
+# is one plain folder, so it cannot alias a different family through a link.
+TARGETS=("$MIRROR")
+for ((i=1; i<${#SOURCES[@]}; i++)); do
+    target="$MIRROR/${NAMESPACES[$i]}"
+    [ ! -L "$target" ] || fail "extra mirror destination is a symlink: $target"
+    if [ -e "$target" ] && [ ! -d "$target" ]; then fail "extra mirror destination is not a directory: $target"; fi
+    mkdir -p "$target" || fail "could not create $target"
+    TARGETS+=("$target")
+done
+for target in "${TARGETS[@]}"; do
+    [ -n "$(find "$target" -maxdepth 0 -type d -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
+        || fail "$target must be owned by this user and not writable by other users"
+done
+
 copied=0
+pair_failures=0
+PAIR=""
+PAIR_COMPLETE=0
+cleanup() {
+    local file
+    [ -n "$PAIR" ] || return 0
+    for file in "$PAIR.hmac" "$PAIR"; do
+        if [ "$PAIR_COMPLETE" -eq 0 ] && [ "$file" -ef "$file.mirroring" ]; then rm -f "$file"; fi
+        rm -f "$file.mirroring"
+    done
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 copy_one() {
-    local name to
-    name="$(basename "$1")"
-    to="$MIRROR/$name"
-    [ ! -e "$to" ] || return 0
-    # -P: a source swapped for a symlink since the check in the loop is
-    # copied as a link, never followed, and then refused here.
-    cp -pP "$1" "$to.mirroring" || fail "could not copy $name"
-    if [ ! -f "$to.mirroring" ] || [ -L "$to.mirroring" ]; then
-        rm -f "$to.mirroring"
-        fail "$name was not a plain file when copied"
+    local from="$1" target="$2" name to compare_status
+    name="$(basename "$from")"
+    to="$target/$name"
+    [ -f "$from" ] && [ ! -L "$from" ] || fail "$name was not a plain file when copied"
+    [ -n "$(find "$from" -maxdepth 0 -type f -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
+        || fail "$name must be owned by this user and not writable by other users"
+    if [ -e "$to" ] || [ -L "$to" ]; then
+        [ -f "$to" ] && [ ! -L "$to" ] || fail "$name in the mirror is not a plain file"
+        [ -n "$(find "$to" -maxdepth 0 -type f -user "$(id -u)" ! -perm -020 ! -perm -002)" ] \
+            || fail "$name in the mirror is not owned privately by this user"
+        if cmp -s "$from" "$to"; then
+            return 0
+        else
+            compare_status=$?
+            [ "$compare_status" -eq 1 ] || fail "could not compare existing mirror copy of $name"
+            note_failure "existing mirror copy of $name differs from its immutable source; pair skipped"
+            pair_failures=$((pair_failures + 1))
+            return 1
+        fi
     fi
-    [ "$(wc -c <"$1")" -eq "$(wc -c <"$to.mirroring")" ] || fail "the copy of $name differs in size"
-    mv "$to.mirroring" "$to" || fail "could not rename the copy of $name"
+    [ ! -e "$to.mirroring" ] && [ ! -L "$to.mirroring" ] || fail "unfinished copy path is not clear: $name"
+    cp -pP "$from" "$to.mirroring" || fail "could not copy $name"
+    if [ ! -f "$to.mirroring" ] || [ -L "$to.mirroring" ]; then fail "$name was not a plain file when copied"; fi
+    [ -f "$from" ] && [ ! -L "$from" ] || fail "$name was not a plain file when copied"
+    [ "$(wc -c <"$from")" -eq "$(wc -c <"$to.mirroring")" ] || fail "the copy of $name differs in size"
+    cmp -s "$from" "$to.mirroring" || fail "the copy of $name differs in content"
+    chmod 600 "$to.mirroring" || fail "could not protect the copy of $name"
+    # Retain the staging inode until the pair is complete; cleanup then knows
+    # which final links belong to this run, including a signal after publication.
+    ln "$to.mirroring" "$to" || fail "could not publish the copy of $name"
     copied=$((copied + 1))
 }
-# One dump at a time, with its sidecar, sidecar first, so the mirror never
-# holds a dump without one. BACKUP_DIR is writable from the containers, so a
-# symlink there is not a dump: it could point anywhere on this Mac.
-for f in "$SRC/${BACKUP_PREFIX}"-*.sql.gz.enc; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    name="$(basename "$f")"
-    [ ! -e "$MIRROR/$name" ] || [ ! -e "$MIRROR/$name.hmac" ] || continue
-    # Past the prune's window already (by the dump's own time, which cp -p
-    # keeps): a copy would only be pruned again tonight.
-    [ -z "$(find "$f" -mtime +"$KEEP_DAYS")" ] || continue
-    [ -f "$f.hmac" ] && [ ! -L "$f.hmac" ] || fail "$name has no .hmac sidecar to copy with it"
-    copy_one "$f.hmac"
-    copy_one "$f"
+
+mirror_family() {
+    local source="$1" target="$2" pattern="$3" f name pair_start
+    find "$target" -maxdepth 1 -type f \
+        \( -name "$pattern.mirroring" -o -name "$pattern.hmac.mirroring" \) -delete \
+        || fail "could not clear unfinished copies in $target"
+    for f in "$source"/$pattern; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        name="$(basename "$f")"
+        [ -z "$(find "$f" -mtime +"$KEEP_DAYS")" ] || continue
+        [ -f "$f.hmac" ] && [ ! -L "$f.hmac" ] || fail "$name has no .hmac sidecar to copy with it"
+        PAIR="$target/$name"
+        PAIR_COMPLETE=0
+        pair_start=$copied
+        if ! copy_one "$f.hmac" "$target" || ! copy_one "$f" "$target"; then
+            cleanup
+            PAIR=""
+            copied=$pair_start
+            continue
+        fi
+        cmp -s "$f.hmac" "$PAIR.hmac" && cmp -s "$f" "$PAIR" \
+            || fail "$name changed while its pair was being copied"
+        PAIR_COMPLETE=1
+        cleanup
+        PAIR=""
+    done
+    # 4. Only this family's immutable encrypted names and sidecars can expire.
+    find "$target" -maxdepth 1 -type f \
+        \( -name "$pattern" -o -name "$pattern.hmac" \) -mtime +"$KEEP_DAYS" -delete \
+        || fail "could not prune $target"
+}
+mirror_family "${REAL_SOURCES[0]}" "${TARGETS[0]}" "${PATTERNS[0]}"
+for ((i=1; i<${#SOURCES[@]}; i++)); do
+    mirror_family "${REAL_SOURCES[$i]}" "${TARGETS[$i]}" "${PATTERNS[$i]}"
 done
 echo "copied $copied files to $MIRROR"
-
-# 4. Prune copies past the window, by the dump names only.
-find "$MIRROR" -maxdepth 1 -type f \
-    \( -name "${BACKUP_PREFIX}-*.sql.gz.enc" -o -name "${BACKUP_PREFIX}-*.sql.gz.enc.hmac" \) \
-    -mtime +"$KEEP_DAYS" -delete \
-    || fail "could not prune $MIRROR"
+if [ "$pair_failures" -gt 0 ]; then
+    echo "$pair_failures mismatched pairs skipped; mirror run incomplete"
+    exit 1
+fi
 
 # 5. Success: a heartbeat, and an alert only when the last run had failed.
 date -u +%Y-%m-%dT%H:%M:%SZ >"$HEARTBEAT" 2>/dev/null || echo "heartbeat not written: $HEARTBEAT"

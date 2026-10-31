@@ -248,6 +248,10 @@ PGDATA_VOLUME="${COMPOSE_PROJECT}_${DB_VOLUME}"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="$DEST_DIR/backup-$STAMP"
 export DOCKER_HOST="unix://${COLIMA_HOME}/${COLIMA_PROFILE}/docker.sock"
+# Extra families travel in the same checked product.settings and LaunchAgent.
+if [ -n "${BACKUP_MIRROR_EXTRA_SOURCES:-}" ] && [ -z "${BACKUP_MIRROR_DIR:-}" ]; then
+    stop "BACKUP_MIRROR_EXTRA_SOURCES requires BACKUP_MIRROR_DIR"
+fi
 # The backup mirror is optional: BACKUP_MIRROR_DIR empty installs none.
 # backup-mirror.sh checks the directories itself on every run.
 if [ -n "${BACKUP_MIRROR_DIR:-}" ]; then

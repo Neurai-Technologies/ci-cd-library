@@ -63,19 +63,7 @@ PROJECT="${LOG_ARCHIVE_PROJECT:-$COMPOSE_PROJECT}"
 # between two archives. Rotation renames a file and keeps its mtime.
 RECENT_MINUTES=1500
 
-# Encrypt-then-MAC, identical to backup.sh (a test pins the two): the .hmac
-# sidecar is keyed from the passphrase under the same label-only salt, so the
-# same openssl commands verify and decrypt a dump or a log archive.
-mac_key() {
-    # PBKDF2 at openssl's default 10,000 rounds under a fixed, label-only salt
-    # (BACKUP_HMAC_SALT, hex-encoded for -S exactly as restore.sh does), so guessing the passphrase from a sidecar costs as much as
-    # guessing it from the ciphertext. -P prints the derived key, nothing is
-    # encrypted, and the passphrase still travels by env, never argv.
-    openssl enc -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASSPHRASE -S "$(printf '%s' "$BACKUP_HMAC_SALT" | od -An -tx1 | tr -d ' \n')" -P | sed -n 's/^key=//p'
-}
-hmac_of() {
-    openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(mac_key)" -r "$1" | cut -c1-64
-}
+. "$(dirname "$0")/crypto.sh"
 
 # Off-site copy under the logs/ prefix of the same bucket backup.sh uses, so
 # one lifecycle rule per prefix sets each kind's expiry.
@@ -166,13 +154,13 @@ archive() {
     # them and stores them under the container's name.
     if tar -chf - -C "$stage" . \
         | gzip \
-        | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASSPHRASE -out "$tmp" \
-        && hmac_of "$tmp" >"${out}.hmac" \
+        | backup_encrypt "$tmp" \
+        && mv "$tmp.hmac" "${out}.hmac" \
         && mv "$tmp" "$out"; then
         echo "log archive written: $out (${copied} files, $(wc -c <"$out") bytes)"
         offsite "$out" "${out}.hmac"
     else
-        rm -f "$tmp" "${out}.hmac"
+        rm -f "$tmp" "$tmp.hmac" "${out}.hmac"
         echo "log archive FAILED at ${ts}" >&2
         rm -rf "$stage"
         return 1
@@ -193,7 +181,8 @@ fi
 
 # A container killed mid-archive leaves a partial file behind (and, under a
 # test, a staging directory); clear both once, at start.
-rm -rf "${STAGE}"/stage-* "${ROOT}"/*.writing
+# Crypto leftovers share .writing's startup-only cleanup and accepted once overlap.
+rm -rf "${STAGE}"/stage-* "${ROOT}"/*.writing "${ROOT}"/*.writing.hmac "${ROOT}"/.backup-crypto.*
 while true; do
     # The retention window, applied whatever tonight's archive does: an
     # archive that fails must not keep old ones alive past their day.

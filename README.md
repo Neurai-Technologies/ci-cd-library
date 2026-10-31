@@ -21,6 +21,8 @@ until it bumps the pin.
   Fetching a bare SHA from GitHub works for reachable commits (unverified
   here).
 
+Shared encryption API: [docs/BACKUP-CRYPTO.md](docs/BACKUP-CRYPTO.md).
+
 Step-by-step adoption and updating: [docs/ADOPT.md](docs/ADOPT.md).
 
 ## What stays in the product repository

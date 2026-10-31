@@ -141,9 +141,24 @@ def test_a_copy_the_mirror_has_is_never_replaced(host: Host) -> None:
     dump(host.src, f"{DUMP}.hmac", size=65)
     kept = dump(host.mirror, DUMP, size=100).read_bytes()
 
-    assert host.run().returncode == 0, host.log
+    assert host.run().returncode != 0, host.log
     assert (host.mirror / DUMP).read_bytes() == kept
-    assert "copied 1 files" in host.log
+    assert "differs from its immutable source" in host.log
+    assert not (host.mirror / f"{DUMP}.hmac").exists()
+    assert "copied 0 files" in host.log
+
+
+def test_an_existing_copy_read_error_still_stops_the_run(host: Host) -> None:
+    pair(host.src)
+    assert host.run().returncode == 0, host.log
+    newer = "fakedump-20261031-030000.sql.gz.enc"
+    pair(host.src, newer)
+    real_cmp = shutil.which("cmp", path="/usr/bin:/bin")
+    assert real_cmp
+    fake(host.tmp / "bin", "cmp", f'case "$2" in */{DUMP}.hmac) exit 2 ;; esac\nexec "{real_cmp}" "$@"\n')
+    assert host.run().returncode != 0
+    assert not (host.mirror / newer).exists()
+    assert "could not compare existing mirror copy" in host.log
 
 
 def test_the_prune_takes_only_old_dump_copies(host: Host) -> None:
