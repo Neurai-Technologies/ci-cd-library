@@ -5,7 +5,7 @@
 # Pinned by digest (docker:27-cli, compose v2.33.0 - the version whose
 # --remove-orphans/profile behavior was empirically verified): a floating tag
 # could pick up a compose that treats the profiled deployer as an orphan.
-FROM docker@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+FROM docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
 RUN apk add --no-cache git jq curl bash python3
 COPY deploy-loop.sh /deploy-loop.sh
 # ci-policy.json is rendered beside these by deploy-loop.sh at start.
